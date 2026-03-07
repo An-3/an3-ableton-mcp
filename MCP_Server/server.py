@@ -103,9 +103,11 @@ class AbletonConnection:
         # Check if this is a state-modifying command
         is_modifying_command = command_type in [
             "create_midi_track", "create_audio_track", "set_track_name",
-            "create_clip", "add_notes_to_clip", "set_clip_name",
-            "set_tempo", "fire_clip", "stop_clip", "set_device_parameter",
-            "start_playback", "stop_playback", "load_instrument_or_effect"
+            "set_track_volume", "set_track_panning", "create_clip",
+            "add_notes_to_clip", "set_clip_name", "set_tempo", "fire_clip",
+            "stop_clip", "set_device_parameter", "start_playback",
+            "stop_playback", "load_instrument_or_effect", "load_browser_item",
+            "load_audio_clip", "place_clip_in_arrangement"
         ]
         
         try:
@@ -316,6 +318,23 @@ def create_midi_track(ctx: Context, index: int = -1) -> str:
 
 
 @mcp.tool()
+def create_audio_track(ctx: Context, index: int = -1) -> str:
+    """
+    Create a new audio track in the Ableton session.
+
+    Parameters:
+    - index: The index to insert the track at (-1 = end of list)
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("create_audio_track", {"index": index})
+        return f"Created new audio track: {result.get('name', 'unknown')}"
+    except Exception as e:
+        logger.error(f"Error creating audio track: {str(e)}")
+        return f"Error creating audio track: {str(e)}"
+
+
+@mcp.tool()
 def set_track_name(ctx: Context, track_index: int, name: str) -> str:
     """
     Set the name of a track.
@@ -406,6 +425,61 @@ def set_device_parameter(ctx: Context, track_index: int, device_index: int, para
     except Exception as e:
         logger.error(f"Error setting device parameter: {str(e)}")
         return f"Error setting device parameter: {str(e)}"
+
+
+@mcp.tool()
+def load_audio_clip(ctx: Context, track_index: int, clip_index: int, file_path: str) -> str:
+    """
+    Load an audio file into a clip slot on an audio track.
+
+    Parameters:
+    - track_index: The index of the destination track
+    - clip_index: The destination clip slot index
+    - file_path: Absolute path to the source audio file
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("load_audio_clip", {
+            "track_index": track_index,
+            "clip_index": clip_index,
+            "file_path": file_path
+        })
+        if result.get("loaded", False):
+            return (
+                f"Loaded audio clip '{result.get('clip_name', '')}' from "
+                f"'{result.get('file', file_path)}' into track {track_index}, slot {clip_index}"
+            )
+        return f"Failed to load audio clip from '{file_path}'"
+    except Exception as e:
+        logger.error(f"Error loading audio clip: {str(e)}")
+        return f"Error loading audio clip: {str(e)}"
+
+
+@mcp.tool()
+def place_clip_in_arrangement(ctx: Context, track_index: int, arrangement_time: float) -> str:
+    """
+    Place the audio clip from session slot 0 onto the arrangement timeline.
+
+    Parameters:
+    - track_index: The index of the source track
+    - arrangement_time: Start time in beats for arrangement placement
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("place_clip_in_arrangement", {
+            "track_index": track_index,
+            "arrangement_time": arrangement_time
+        })
+        if result.get("placed", False):
+            return (
+                f"Placed clip from track {track_index} into arrangement at "
+                f"{result.get('time')} beats"
+            )
+        return f"Failed to place clip from track {track_index} into arrangement"
+    except Exception as e:
+        logger.error(f"Error placing clip in arrangement: {str(e)}")
+        return f"Error placing clip in arrangement: {str(e)}"
+
 
 @mcp.tool()
 def create_clip(ctx: Context, track_index: int, clip_index: int, length: float = 4.0) -> str:
