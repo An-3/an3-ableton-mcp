@@ -231,14 +231,20 @@ class AbletonMCP(ControlSurface):
                 response["result"] = self._get_track_routing(track_index)
             elif command_type == "get_master_meter":
                 response["result"] = self._get_master_meter()
+            elif command_type == "get_transport_state":
+                response["result"] = self._get_transport_state()
+            elif command_type == "list_playing_clips":
+                response["result"] = self._list_playing_clips()
             # Commands that modify Live's state should be scheduled on the main thread
             elif command_type in ["create_midi_track", "set_track_name",
                                  "set_track_volume", "set_track_panning",
                                  "get_device_parameters", "set_device_parameter",
                                  "create_clip", "add_notes_to_clip", "set_clip_name",
                                  "set_tempo", "fire_clip", "stop_clip",
-                                 "start_playback", "stop_playback", "load_browser_item",
-                                 "set_track_output_routing"]:
+                                 "start_playback", "stop_playback",
+                                 "load_instrument_or_effect", "load_browser_item",
+                                 "set_track_output_routing", "stop_all_clips",
+                                 "back_to_arrangement"]:
                 # Use a thread-safe approach with a response queue
                 response_queue = queue.Queue()
                 
@@ -301,6 +307,10 @@ class AbletonMCP(ControlSurface):
                             result = self._start_playback()
                         elif command_type == "stop_playback":
                             result = self._stop_playback()
+                        elif command_type == "stop_all_clips":
+                            result = self._stop_all_clips()
+                        elif command_type == "back_to_arrangement":
+                            result = self._back_to_arrangement()
                         elif command_type == "load_instrument_or_effect":
                             track_index = params.get("track_index", 0)
                             uri = params.get("uri", "")
@@ -438,6 +448,13 @@ class AbletonMCP(ControlSurface):
         except (TypeError, ValueError):
             return None
 
+    def _safe_int(self, value):
+        """Convert a value to int, returning None when unavailable."""
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
     def _linear_to_db(self, value):
         """Convert a linear meter value to dBFS."""
         linear = self._safe_float(value)
@@ -446,6 +463,215 @@ class AbletonMCP(ControlSurface):
         if linear <= 0.0:
             return -120.0
         return 20.0 * math.log10(linear)
+
+    def _get_back_to_arrangement_binding(self):
+        """Find a Live API binding that can expose or trigger Back to Arrangement."""
+        candidates = [("song", self._song)]
+        try:
+            song_view = getattr(self._song, "view", None)
+        except Exception:
+            song_view = None
+        if song_view is not None:
+            candidates.append(("song.view", song_view))
+        try:
+            app = self.application()
+        except Exception:
+            app = None
+        if app is not None:
+            app_view = getattr(app, "view", None)
+            if app_view is not None:
+                candidates.append(("application.view", app_view))
+
+        for source, target in candidates:
+            if target is None:
+                continue
+            try:
+                attr = getattr(target, "back_to_arranger")
+            except Exception:
+                continue
+            return {
+                "source": source + ".back_to_arranger",
+                "target": target,
+                "attribute": attr,
+            }
+        return None
+
+    def _get_back_to_arrangement_state(self):
+        """Return whether Session currently overrides the Arrangement, when observable."""
+        binding = self._get_back_to_arrangement_binding()
+        if binding is None:
+            return {
+                "known": False,
+                "session_override_active": None,
+                "source": None,
+            }
+
+        attribute = binding["attribute"]
+        if callable(attribute):
+            return {
+                "known": False,
+                "session_override_active": None,
+                "source": binding["source"],
+            }
+
+        try:
+            value = bool(attribute)
+        except Exception:
+            return {
+                "known": False,
+                "session_override_active": None,
+                "source": binding["source"],
+            }
+
+        return {
+            "known": True,
+            "session_override_active": value,
+            "source": binding["source"],
+        }
+
+    def _get_track_playback_state(self, track):
+        """Collect per-track Session playback state."""
+        playing_slot_index = self._safe_int(getattr(track, "playing_slot_index", None))
+        fired_slot_index = self._safe_int(getattr(track, "fired_slot_index", None))
+        return {
+            "playing_slot_index": playing_slot_index,
+            "fired_slot_index": fired_slot_index,
+            "has_playing_session_clip": playing_slot_index is not None and playing_slot_index >= 0,
+            "has_fired_session_clip": fired_slot_index is not None and fired_slot_index >= 0,
+            "arrangement_playing": playing_slot_index == -2,
+            "track_stopped": playing_slot_index == -1,
+        }
+
+    def _clip_state_payload(self, track_index, track, slot_index, state):
+        """Serialize a playing or fired Session clip."""
+        clip_name = ""
+        has_clip = False
+        clip_slot_count = len(track.clip_slots)
+        if 0 <= slot_index < clip_slot_count:
+            clip_slot = track.clip_slots[slot_index]
+            has_clip = bool(clip_slot.has_clip)
+            if has_clip and clip_slot.clip:
+                clip_name = clip_slot.clip.name
+        return {
+            "track_index": track_index,
+            "track_name": track.name,
+            "slot_index": slot_index,
+            "clip_name": clip_name,
+            "has_clip": has_clip,
+            "state": state,
+        }
+
+    def _collect_playing_clips(self):
+        """Collect currently active Session clips across all tracks."""
+        playing_clips = []
+        for track_index, track in enumerate(self._song.tracks):
+            playback_state = self._get_track_playback_state(track)
+            seen_slots = set()
+
+            playing_slot_index = playback_state["playing_slot_index"]
+            if playing_slot_index is not None and playing_slot_index >= 0:
+                playing_clips.append(
+                    self._clip_state_payload(track_index, track, playing_slot_index, "playing")
+                )
+                seen_slots.add(playing_slot_index)
+
+            fired_slot_index = playback_state["fired_slot_index"]
+            if fired_slot_index is not None and fired_slot_index >= 0 and fired_slot_index not in seen_slots:
+                playing_clips.append(
+                    self._clip_state_payload(track_index, track, fired_slot_index, "fired")
+                )
+                seen_slots.add(fired_slot_index)
+
+            if not seen_slots:
+                for slot_index, clip_slot in enumerate(track.clip_slots):
+                    if not clip_slot.has_clip or not clip_slot.clip:
+                        continue
+                    if clip_slot.clip.is_playing:
+                        playing_clips.append(
+                            self._clip_state_payload(track_index, track, slot_index, "playing")
+                        )
+                        seen_slots.add(slot_index)
+
+        return playing_clips
+
+    def _get_transport_state(self):
+        """Get transport state and Arrangement export safety metadata."""
+        try:
+            playing_clips = self._collect_playing_clips()
+            back_state = self._get_back_to_arrangement_state()
+            if back_state["known"]:
+                session_override_active = back_state["session_override_active"]
+                detection_method = "direct"
+            elif playing_clips:
+                session_override_active = True
+                detection_method = "inferred_from_active_session_clips"
+            else:
+                session_override_active = None
+                detection_method = "unknown"
+
+            return {
+                "is_playing": bool(self._song.is_playing),
+                "current_song_time": self._safe_float(getattr(self._song, "current_song_time", None)),
+                "playing_clip_count": len(playing_clips),
+                "playing_clips": playing_clips,
+                "arrangement_state_known": back_state["known"],
+                "session_override_active": session_override_active,
+                "session_override_detection": detection_method,
+                "back_to_arrangement_source": back_state["source"],
+                "arrangement_export_ready": bool(
+                    back_state["known"] and not back_state["session_override_active"] and not playing_clips
+                ),
+            }
+        except Exception as e:
+            self.log_message("Error getting transport state: " + str(e))
+            raise
+
+    def _list_playing_clips(self):
+        """List the currently active Session clips."""
+        try:
+            playing_clips = self._collect_playing_clips()
+            transport_state = self._get_transport_state()
+            return {
+                "playing_clips": playing_clips,
+                "count": len(playing_clips),
+                "session_override_active": transport_state.get("session_override_active"),
+                "arrangement_state_known": transport_state.get("arrangement_state_known"),
+            }
+        except Exception as e:
+            self.log_message("Error listing playing clips: " + str(e))
+            raise
+
+    def _invoke_back_to_arrangement(self):
+        """Attempt to trigger Back to Arrangement directly through the Live API."""
+        binding = self._get_back_to_arrangement_binding()
+        if binding is None:
+            return None
+
+        attribute = binding["attribute"]
+        if callable(attribute):
+            attribute()
+            return {
+                "method": binding["source"],
+                "action": "called",
+            }
+
+        try:
+            setattr(binding["target"], "back_to_arranger", 0)
+            return {
+                "method": binding["source"],
+                "action": "set_int_zero",
+            }
+        except Exception:
+            pass
+
+        try:
+            setattr(binding["target"], "back_to_arranger", False)
+            return {
+                "method": binding["source"],
+                "action": "set_false",
+            }
+        except Exception:
+            return None
 
     def _get_master_meter(self):
         """Get current master meter values and clipping state."""
@@ -521,6 +747,7 @@ class AbletonMCP(ControlSurface):
                 "volume": track.mixer_device.volume.value,
                 "panning": track.mixer_device.panning.value,
                 "routing": self._routing_info_for_track(track),
+                "playback_state": self._get_track_playback_state(track),
                 "clip_slots": clip_slots,
                 "devices": devices
             }
@@ -998,6 +1225,71 @@ class AbletonMCP(ControlSurface):
             return result
         except Exception as e:
             self.log_message("Error stopping playback: " + str(e))
+            raise
+
+    def _stop_all_clips(self):
+        """Stop all Session clips without claiming Arrangement has been restored."""
+        try:
+            playing_before = self._collect_playing_clips()
+            method = None
+            if hasattr(self._song, "stop_all_clips"):
+                self._song.stop_all_clips()
+                method = "song.stop_all_clips"
+            else:
+                method = "clip_slot.stop"
+                for track in self._song.tracks:
+                    stop_all = getattr(track, "stop_all_clips", None)
+                    if callable(stop_all):
+                        stop_all()
+                        continue
+                    for clip_slot in track.clip_slots:
+                        try:
+                            clip_slot.stop()
+                        except Exception:
+                            continue
+
+            transport_state = self._get_transport_state()
+            playing_after = transport_state.get("playing_clips", [])
+            return {
+                "method": method,
+                "playing_clip_count_before": len(playing_before),
+                "playing_clip_count_after": len(playing_after),
+                "stopped": len(playing_after) == 0,
+                "transport_state": transport_state,
+            }
+        except Exception as e:
+            self.log_message("Error stopping all clips: " + str(e))
+            raise
+
+    def _back_to_arrangement(self):
+        """Return the set to Arrangement playback and report whether that was verified."""
+        try:
+            playing_before = self._collect_playing_clips()
+            invocation = self._invoke_back_to_arrangement()
+            fallback_used = False
+            if invocation is None:
+                fallback_used = True
+                invocation = self._stop_all_clips()
+                invocation = {
+                    "method": invocation.get("method"),
+                    "action": "fallback_stop_all_clips",
+                }
+
+            transport_state = self._get_transport_state()
+            playing_after = transport_state.get("playing_clips", [])
+            return {
+                "method": invocation.get("method"),
+                "action": invocation.get("action"),
+                "fallback_used": fallback_used,
+                "playing_clips_before": playing_before,
+                "playing_clips_after": playing_after,
+                "arrangement_export_ready": transport_state.get("arrangement_export_ready", False),
+                "transport_state": transport_state,
+                "warning": None if transport_state.get("arrangement_export_ready", False)
+                else "Arrangement state could not be positively verified after this action.",
+            }
+        except Exception as e:
+            self.log_message("Error returning to Arrangement: " + str(e))
             raise
     
     def _get_browser_item(self, uri, path):

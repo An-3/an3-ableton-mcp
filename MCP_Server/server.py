@@ -110,7 +110,8 @@ class AbletonConnection:
             "stop_clip", "set_device_parameter", "start_playback",
             "stop_playback", "load_instrument_or_effect", "load_browser_item",
             "load_audio_clip", "place_clip_in_arrangement",
-            "set_track_output_routing"
+            "set_track_output_routing", "stop_all_clips",
+            "back_to_arrangement"
         ]
         
         try:
@@ -333,6 +334,64 @@ def _list_tracks_data(ableton: AbletonConnection) -> List[Dict[str, Any]]:
     return tracks
 
 
+def _get_transport_state_data(ableton: AbletonConnection) -> Dict[str, Any]:
+    return ableton.send_command("get_transport_state")
+
+
+def _list_playing_clips_data(ableton: AbletonConnection) -> Dict[str, Any]:
+    result = ableton.send_command("list_playing_clips")
+    if isinstance(result, dict):
+        result.setdefault("playing_clips", [])
+        result.setdefault("count", len(result.get("playing_clips", [])))
+        return result
+    return {
+        "playing_clips": result or [],
+        "count": len(result or []),
+    }
+
+
+def _verify_arrangement_export_ready_data(ableton: AbletonConnection) -> Dict[str, Any]:
+    transport_state = _get_transport_state_data(ableton)
+    playing_payload = _list_playing_clips_data(ableton)
+    playing_clips = playing_payload.get("playing_clips", [])
+    session_override_active = transport_state.get("session_override_active")
+    arrangement_state_known = bool(transport_state.get("arrangement_state_known"))
+
+    issues = []
+    recommended_action = "Arrangement playback is safe to export."
+    verification_level = "verified" if arrangement_state_known else "best_effort"
+    ready = bool(
+        arrangement_state_known and
+        session_override_active is False and
+        not playing_clips
+    )
+
+    if playing_clips:
+        issues.append("active_session_clips")
+    if session_override_active is True:
+        issues.append("session_override_active")
+    if not arrangement_state_known:
+        issues.append("arrangement_state_unverified")
+
+    if not ready:
+        if "active_session_clips" in issues or "session_override_active" in issues:
+            recommended_action = "Call back_to_arrangement() and verify again before export."
+        else:
+            recommended_action = (
+                "Restore Arrangement playback manually with Back to Arrangement, "
+                "confirm clips are no longer gray, then verify again before export."
+            )
+
+    return {
+        "ready": ready,
+        "issues": issues,
+        "verification_level": verification_level,
+        "recommended_action": recommended_action,
+        "transport_state": transport_state,
+        "playing_clips": playing_clips,
+    }
+
+
 def _find_track_by_name_data(tracks: List[Dict[str, Any]], name: str) -> Optional[Dict[str, Any]]:
     wanted = name.strip().lower()
     for track in tracks:
@@ -532,6 +591,30 @@ def get_track_routing(ctx: Context, track_index: int) -> str:
 
 
 @mcp.tool()
+def get_transport_state(ctx: Context) -> str:
+    """Get transport status and Arrangement export-safety information."""
+    try:
+        ableton = get_ableton_connection()
+        result = _get_transport_state_data(ableton)
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error getting transport state: {str(e)}")
+        return f"Error getting transport state: {str(e)}"
+
+
+@mcp.tool()
+def list_playing_clips(ctx: Context) -> str:
+    """List the Session clips that are currently playing or fired."""
+    try:
+        ableton = get_ableton_connection()
+        result = _list_playing_clips_data(ableton)
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error listing playing clips: {str(e)}")
+        return f"Error listing playing clips: {str(e)}"
+
+
+@mcp.tool()
 def list_tracks(ctx: Context) -> str:
     """List the current tracks with stable metadata."""
     try:
@@ -548,6 +631,7 @@ def list_tracks(ctx: Context) -> str:
                 "panning": track.get("panning"),
                 "device_count": len(track.get("devices", [])),
                 "routing": track.get("routing"),
+                "playback_state": track.get("playback_state"),
             })
         return json.dumps(result, indent=2)
     except Exception as e:
@@ -1170,6 +1254,42 @@ def stop_playback(ctx: Context) -> str:
     except Exception as e:
         logger.error(f"Error stopping playback: {str(e)}")
         return f"Error stopping playback: {str(e)}"
+
+
+@mcp.tool()
+def stop_all_clips(ctx: Context) -> str:
+    """Stop all Session clips and report the resulting playback state."""
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("stop_all_clips")
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error stopping all clips: {str(e)}")
+        return f"Error stopping all clips: {str(e)}"
+
+
+@mcp.tool()
+def back_to_arrangement(ctx: Context) -> str:
+    """Return playback to Arrangement mode and report whether that was verified."""
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("back_to_arrangement")
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error restoring Arrangement playback: {str(e)}")
+        return f"Error restoring Arrangement playback: {str(e)}"
+
+
+@mcp.tool()
+def verify_arrangement_export_ready(ctx: Context) -> str:
+    """Confirm that the set is safe to export from Arrangement playback."""
+    try:
+        ableton = get_ableton_connection()
+        result = _verify_arrangement_export_ready_data(ableton)
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error verifying Arrangement export readiness: {str(e)}")
+        return f"Error verifying Arrangement export readiness: {str(e)}"
 
 @mcp.tool()
 def get_browser_tree(ctx: Context, category_type: str = "all") -> str:
