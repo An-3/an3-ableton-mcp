@@ -1,11 +1,13 @@
 # ableton_mcp_server.py
 from mcp.server.fastmcp import FastMCP, Context
+import math
+import os
 import socket
 import json
 import logging
 from dataclasses import dataclass
 from contextlib import asynccontextmanager
-from typing import AsyncIterator, Dict, Any, List, Union
+from typing import AsyncIterator, Dict, Any, List, Optional, Union
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, 
@@ -107,7 +109,8 @@ class AbletonConnection:
             "add_notes_to_clip", "set_clip_name", "set_tempo", "fire_clip",
             "stop_clip", "set_device_parameter", "start_playback",
             "stop_playback", "load_instrument_or_effect", "load_browser_item",
-            "load_audio_clip", "place_clip_in_arrangement"
+            "load_audio_clip", "place_clip_in_arrangement",
+            "set_track_output_routing"
         ]
         
         try:
@@ -195,6 +198,63 @@ mcp = FastMCP(
 # Global connection for resources
 _ableton_connection = None
 
+MASTERING_PRESET_DEVICE_URIS = {
+    "STREAM_SAFE_TRANSPARENT": [
+        "query:AudioFx#Utility",
+        "query:AudioFx#EQ%20Eight",
+        "query:AudioFx#Glue%20Compressor",
+        "query:AudioFx#Saturator",
+        "query:AudioFx#Limiter",
+    ],
+    "STREAM_LOUD_CONTROLLED": [
+        "query:AudioFx#Utility",
+        "query:AudioFx#EQ%20Eight",
+        "query:AudioFx#Compressor",
+        "query:AudioFx#Multiband%20Dynamics",
+        "query:AudioFx#Limiter",
+    ],
+    "CLUB_IMPACT": [
+        "query:AudioFx#Utility",
+        "query:AudioFx#EQ%20Eight",
+        "query:AudioFx#Glue%20Compressor",
+        "query:AudioFx#Saturator",
+        "query:AudioFx#Limiter",
+    ],
+    "SUB_TIGHT": [
+        "query:AudioFx#Utility",
+        "query:AudioFx#EQ%20Eight",
+        "query:AudioFx#Multiband%20Dynamics",
+        "query:AudioFx#Saturator",
+        "query:AudioFx#Limiter",
+    ],
+    "VOCAL_FORWARD": [
+        "query:AudioFx#Utility",
+        "query:AudioFx#EQ%20Eight",
+        "query:AudioFx#Glue%20Compressor",
+        "query:AudioFx#Limiter",
+    ],
+    "HARSH_SOFTENER": [
+        "query:AudioFx#Utility",
+        "query:AudioFx#EQ%20Eight",
+        "query:AudioFx#Multiband%20Dynamics",
+        "query:AudioFx#Limiter",
+    ],
+    "WIDE_TOPS": [
+        "query:AudioFx#Utility",
+        "query:AudioFx#EQ%20Eight",
+        "query:AudioFx#Saturator",
+        "query:AudioFx#Limiter",
+    ],
+    "MINIMAL_TOUCH": [
+        "query:AudioFx#Utility",
+        "query:AudioFx#EQ%20Eight",
+        "query:AudioFx#Limiter",
+    ],
+}
+
+REFERENCE_TRACK_KEYWORDS = ("reference", "ref", "a/b", "ab")
+MAIN_ROUTING_CANDIDATES = ("Main", "Master")
+
 def get_ableton_connection():
     """Get or create a persistent Ableton connection"""
     global _ableton_connection
@@ -258,6 +318,172 @@ def get_ableton_connection():
     return _ableton_connection
 
 
+def _linear_to_db(value: float) -> float:
+    if value <= 0.0:
+        return -120.0
+    return 20.0 * math.log10(value)
+
+
+def _list_tracks_data(ableton: AbletonConnection) -> List[Dict[str, Any]]:
+    session = ableton.send_command("get_session_info")
+    track_count = int(session.get("track_count", 0))
+    tracks = []
+    for track_index in range(track_count):
+        tracks.append(ableton.send_command("get_track_info", {"track_index": track_index}))
+    return tracks
+
+
+def _find_track_by_name_data(tracks: List[Dict[str, Any]], name: str) -> Optional[Dict[str, Any]]:
+    wanted = name.strip().lower()
+    for track in tracks:
+        if track.get("name", "").strip().lower() == wanted:
+            return track
+    return None
+
+
+def _find_reference_tracks_data(tracks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    matches = []
+    for track in tracks:
+        track_name = track.get("name", "").strip().lower()
+        if any(keyword in track_name for keyword in REFERENCE_TRACK_KEYWORDS):
+            matches.append(track)
+    return matches
+
+
+def _ensure_premaster_track_data(
+    ableton: AbletonConnection,
+    premaster_name: str = "PREMASTER"
+) -> Dict[str, Any]:
+    tracks = _list_tracks_data(ableton)
+    existing = _find_track_by_name_data(tracks, premaster_name)
+    if existing:
+        return {"created": False, "track": existing}
+
+    created = ableton.send_command("create_audio_track", {"index": -1})
+    track_index = created.get("index")
+    if track_index is None:
+        raise Exception("create_audio_track did not return an index")
+
+    ableton.send_command("set_track_name", {
+        "track_index": track_index,
+        "name": premaster_name,
+    })
+    track = ableton.send_command("get_track_info", {"track_index": track_index})
+    return {"created": True, "track": track}
+
+
+def _append_browser_device_data(
+    ableton: AbletonConnection,
+    track_index: int,
+    item_uri: str
+) -> Dict[str, Any]:
+    before = ableton.send_command("get_track_info", {"track_index": track_index})
+    before_names = [device.get("name", "") for device in before.get("devices", [])]
+
+    load_result = ableton.send_command("load_browser_item", {
+        "track_index": track_index,
+        "item_uri": item_uri,
+    })
+
+    after = ableton.send_command("get_track_info", {"track_index": track_index})
+    after_names = [device.get("name", "") for device in after.get("devices", [])]
+    appended = after_names[len(before_names):] if len(after_names) >= len(before_names) else []
+
+    return {
+        "track_index": track_index,
+        "item_uri": item_uri,
+        "loaded": load_result.get("loaded", False),
+        "item_name": load_result.get("item_name", ""),
+        "devices_before": before_names,
+        "devices_after": after_names,
+        "appended_devices": appended,
+    }
+
+
+def _resolve_main_routing_name(routing_options: List[Dict[str, Any]]) -> Optional[str]:
+    for candidate in MAIN_ROUTING_CANDIDATES:
+        for option in routing_options:
+            if option.get("display_name", "") == candidate:
+                return candidate
+    return routing_options[0].get("display_name") if routing_options else None
+
+
+def _short_term_loudness_max(data, rate: int) -> Optional[float]:
+    import numpy as np
+    import pyloudnorm as pyln
+
+    if data.ndim == 1:
+        data = data[:, np.newaxis]
+
+    total_samples = data.shape[0]
+    window_samples = int(rate * 3.0)
+    hop_samples = int(rate * 1.0)
+    meter = pyln.Meter(rate)
+
+    if total_samples <= window_samples:
+        value = meter.integrated_loudness(data)
+        return float(value) if np.isfinite(value) else None
+
+    values = []
+    for start in range(0, total_samples - window_samples + 1, hop_samples):
+        window = data[start:start + window_samples]
+        loudness = meter.integrated_loudness(window)
+        if np.isfinite(loudness):
+            values.append(float(loudness))
+
+    if not values:
+        return None
+    return max(values)
+
+
+def _true_peak_linear(data) -> float:
+    import numpy as np
+    from scipy.signal import resample_poly
+
+    if data.ndim == 1:
+        data = data[:, np.newaxis]
+
+    peak = 0.0
+    for channel_index in range(data.shape[1]):
+        oversampled = resample_poly(data[:, channel_index], 4, 1)
+        if oversampled.size:
+            peak = max(peak, float(np.max(np.abs(oversampled))))
+    return peak
+
+
+def _analyze_audio_file_data(file_path: str) -> Dict[str, Any]:
+    import numpy as np
+    import pyloudnorm as pyln
+    import soundfile as sf
+
+    abs_path = os.path.abspath(file_path)
+    if not os.path.exists(abs_path):
+        raise FileNotFoundError(abs_path)
+
+    data, rate = sf.read(abs_path, always_2d=True)
+    duration_seconds = float(len(data) / float(rate)) if rate else 0.0
+    meter = pyln.Meter(rate)
+
+    lufs_i = float(meter.integrated_loudness(data))
+    lra = float(meter.loudness_range(data))
+    lufs_s_max = _short_term_loudness_max(data, rate)
+
+    sample_peak_linear = float(np.max(np.abs(data))) if data.size else 0.0
+    true_peak_linear = _true_peak_linear(data)
+
+    return {
+        "file_path": abs_path,
+        "sample_rate": int(rate),
+        "channels": int(data.shape[1]) if data.ndim > 1 else 1,
+        "duration_seconds": duration_seconds,
+        "lufs_i": lufs_i,
+        "lufs_s_max": lufs_s_max,
+        "lra": lra,
+        "true_peak_dbtp": _linear_to_db(true_peak_linear),
+        "sample_peak_dbfs": _linear_to_db(sample_peak_linear),
+    }
+
+
 # Core Tool endpoints
 
 @mcp.tool()
@@ -287,6 +513,80 @@ def get_track_info(ctx: Context, track_index: int) -> str:
         logger.error(f"Error getting track info from Ableton: {str(e)}")
         return f"Error getting track info: {str(e)}"
 
+
+@mcp.tool()
+def get_track_routing(ctx: Context, track_index: int) -> str:
+    """
+    Get output routing information for a specific track.
+
+    Parameters:
+    - track_index: The index of the track to inspect
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("get_track_routing", {"track_index": track_index})
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error getting track routing from Ableton: {str(e)}")
+        return f"Error getting track routing: {str(e)}"
+
+
+@mcp.tool()
+def list_tracks(ctx: Context) -> str:
+    """List the current tracks with stable metadata."""
+    try:
+        ableton = get_ableton_connection()
+        tracks = _list_tracks_data(ableton)
+        result = []
+        for track in tracks:
+            result.append({
+                "index": track.get("index"),
+                "name": track.get("name"),
+                "is_audio_track": track.get("is_audio_track"),
+                "is_midi_track": track.get("is_midi_track"),
+                "volume": track.get("volume"),
+                "panning": track.get("panning"),
+                "device_count": len(track.get("devices", [])),
+                "routing": track.get("routing"),
+            })
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error listing tracks: {str(e)}")
+        return f"Error listing tracks: {str(e)}"
+
+
+@mcp.tool()
+def find_track_by_name(ctx: Context, name: str) -> str:
+    """
+    Find a track by case-insensitive exact name.
+
+    Parameters:
+    - name: Track name to search for
+    """
+    try:
+        ableton = get_ableton_connection()
+        tracks = _list_tracks_data(ableton)
+        match = _find_track_by_name_data(tracks, name)
+        if match is None:
+            return f"No track found with name '{name}'"
+        return json.dumps(match, indent=2)
+    except Exception as e:
+        logger.error(f"Error finding track by name: {str(e)}")
+        return f"Error finding track by name: {str(e)}"
+
+
+@mcp.tool()
+def find_reference_tracks(ctx: Context) -> str:
+    """Find tracks whose names suggest they are references."""
+    try:
+        ableton = get_ableton_connection()
+        tracks = _list_tracks_data(ableton)
+        matches = _find_reference_tracks_data(tracks)
+        return json.dumps(matches, indent=2)
+    except Exception as e:
+        logger.error(f"Error finding reference tracks: {str(e)}")
+        return f"Error finding reference tracks: {str(e)}"
+
 @mcp.tool()
 def get_master_meter(ctx: Context) -> str:
     """
@@ -299,6 +599,47 @@ def get_master_meter(ctx: Context) -> str:
     except Exception as e:
         logger.error(f"Error getting master meter from Ableton: {str(e)}")
         return f"Error getting master meter: {str(e)}"
+
+
+@mcp.tool()
+def sample_master_meter(ctx: Context, duration_seconds: float = 5.0, interval_ms: int = 250) -> str:
+    """
+    Sample the master meter over a time window and report the maximum observed values.
+
+    Parameters:
+    - duration_seconds: Total duration to sample
+    - interval_ms: Sampling interval in milliseconds
+    """
+    try:
+        import time
+
+        ableton = get_ableton_connection()
+        interval_seconds = max(0.05, float(interval_ms) / 1000.0)
+        duration_seconds = max(interval_seconds, float(duration_seconds))
+        sample_count = max(1, int(math.ceil(duration_seconds / interval_seconds)))
+
+        samples = []
+        for _ in range(sample_count):
+            samples.append(ableton.send_command("get_master_meter"))
+            time.sleep(interval_seconds)
+
+        peak_linear = max(sample.get("peak_linear") or 0.0 for sample in samples)
+        level_linear = max(sample.get("level_linear") or 0.0 for sample in samples)
+        result = {
+            "duration_seconds": duration_seconds,
+            "interval_ms": interval_ms,
+            "sample_count": sample_count,
+            "max_peak_linear": peak_linear,
+            "max_peak_db": _linear_to_db(peak_linear),
+            "max_level_linear": level_linear,
+            "max_level_db": _linear_to_db(level_linear),
+            "is_clipping": any(bool(sample.get("is_clipping")) for sample in samples),
+            "samples": samples,
+        }
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error sampling master meter: {str(e)}")
+        return f"Error sampling master meter: {str(e)}"
 
 @mcp.tool()
 def create_midi_track(ctx: Context, index: int = -1) -> str:
@@ -332,6 +673,23 @@ def create_audio_track(ctx: Context, index: int = -1) -> str:
     except Exception as e:
         logger.error(f"Error creating audio track: {str(e)}")
         return f"Error creating audio track: {str(e)}"
+
+
+@mcp.tool()
+def ensure_premaster_track(ctx: Context, name: str = "PREMASTER") -> str:
+    """
+    Ensure an audio track exists for mastering and return its metadata.
+
+    Parameters:
+    - name: Name of the premaster track
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = _ensure_premaster_track_data(ableton, name)
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error ensuring premaster track: {str(e)}")
+        return f"Error ensuring premaster track: {str(e)}"
 
 
 @mcp.tool()
@@ -384,6 +742,106 @@ def set_track_panning(ctx: Context, track_index: int, panning: float) -> str:
     except Exception as e:
         logger.error(f"Error setting track panning: {str(e)}")
         return f"Error setting track panning: {str(e)}"
+
+
+@mcp.tool()
+def set_track_output_routing(
+    ctx: Context,
+    track_index: int,
+    routing_type_name: str,
+    routing_channel_name: Optional[str] = None
+) -> str:
+    """
+    Set the output routing type and optional routing channel for a track.
+
+    Parameters:
+    - track_index: The index of the track
+    - routing_type_name: Name of the routing target, such as PREMASTER or Main
+    - routing_channel_name: Optional routing channel name, such as Stereo
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("set_track_output_routing", {
+            "track_index": track_index,
+            "routing_type_name": routing_type_name,
+            "routing_channel_name": routing_channel_name,
+        })
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error setting track output routing: {str(e)}")
+        return f"Error setting track output routing: {str(e)}"
+
+
+@mcp.tool()
+def create_premaster_routing(
+    ctx: Context,
+    premaster_name: str = "PREMASTER",
+    source_track_indices: Optional[List[int]] = None,
+    exclude_track_indices: Optional[List[int]] = None
+) -> str:
+    """
+    Create or reuse a PREMASTER track and route the selected tracks into it.
+
+    Parameters:
+    - premaster_name: Name of the premaster track
+    - source_track_indices: Optional explicit list of source track indices
+    - exclude_track_indices: Optional list of track indices to keep out of PREMASTER
+    """
+    try:
+        ableton = get_ableton_connection()
+        premaster_result = _ensure_premaster_track_data(ableton, premaster_name)
+        premaster_track = premaster_result["track"]
+        premaster_index = premaster_track["index"]
+
+        tracks = _list_tracks_data(ableton)
+        exclude_indices = set(exclude_track_indices or [])
+        exclude_indices.add(premaster_index)
+
+        auto_reference_tracks = _find_reference_tracks_data(tracks)
+        auto_reference_indices = {track["index"] for track in auto_reference_tracks}
+
+        if source_track_indices is None:
+            candidate_indices = [
+                track["index"]
+                for track in tracks
+                if track["index"] not in exclude_indices and track["index"] not in auto_reference_indices
+            ]
+        else:
+            candidate_indices = [
+                track_index for track_index in source_track_indices
+                if track_index not in exclude_indices
+            ]
+
+        routed_tracks = []
+        for track_index in candidate_indices:
+            ableton.send_command("set_track_output_routing", {
+                "track_index": track_index,
+                "routing_type_name": premaster_name,
+            })
+            routed_tracks.append(track_index)
+
+        routing_info = ableton.send_command("get_track_routing", {"track_index": premaster_index})
+        available_outputs = routing_info.get("routing", {}).get("available_output_routing_types", [])
+        main_output_name = _resolve_main_routing_name(available_outputs)
+        if main_output_name:
+            ableton.send_command("set_track_output_routing", {
+                "track_index": premaster_index,
+                "routing_type_name": main_output_name,
+            })
+
+        result = {
+            "premaster_created": premaster_result["created"],
+            "premaster_track_index": premaster_index,
+            "premaster_track_name": premaster_track["name"],
+            "routed_track_indices": routed_tracks,
+            "excluded_track_indices": sorted(exclude_indices),
+            "auto_reference_track_indices": sorted(auto_reference_indices),
+            "premaster_output_target": main_output_name,
+        }
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error creating premaster routing: {str(e)}")
+        return f"Error creating premaster routing: {str(e)}"
 
 @mcp.tool()
 def get_device_parameters(ctx: Context, track_index: int, device_index: int) -> str:
@@ -453,6 +911,58 @@ def load_audio_clip(ctx: Context, track_index: int, clip_index: int, file_path: 
     except Exception as e:
         logger.error(f"Error loading audio clip: {str(e)}")
         return f"Error loading audio clip: {str(e)}"
+
+
+@mcp.tool()
+def append_browser_device(ctx: Context, track_index: int, item_uri: str) -> str:
+    """
+    Append a stock device or browser item to the end of a track's device chain.
+
+    Parameters:
+    - track_index: The destination track index
+    - item_uri: Browser URI, such as query:AudioFx#Utility
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = _append_browser_device_data(ableton, track_index, item_uri)
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error appending browser device: {str(e)}")
+        return f"Error appending browser device: {str(e)}"
+
+
+@mcp.tool()
+def append_mastering_chain(ctx: Context, track_index: int, preset_name: str) -> str:
+    """
+    Append a stock-device mastering chain to a track.
+
+    Parameters:
+    - track_index: The destination track index
+    - preset_name: One of the DnB mastering preset names
+    """
+    try:
+        ableton = get_ableton_connection()
+        normalized_preset = preset_name.strip().upper()
+        chain = MASTERING_PRESET_DEVICE_URIS.get(normalized_preset)
+        if chain is None:
+            available = ", ".join(sorted(MASTERING_PRESET_DEVICE_URIS.keys()))
+            return f"Unknown preset '{preset_name}'. Available presets: {available}"
+
+        appended = []
+        for item_uri in chain:
+            appended.append(_append_browser_device_data(ableton, track_index, item_uri))
+
+        final_track = ableton.send_command("get_track_info", {"track_index": track_index})
+        result = {
+            "track_index": track_index,
+            "preset_name": normalized_preset,
+            "steps": appended,
+            "final_devices": final_track.get("devices", []),
+        }
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error appending mastering chain: {str(e)}")
+        return f"Error appending mastering chain: {str(e)}"
 
 
 @mcp.tool()
@@ -813,6 +1323,22 @@ def load_drum_kit(ctx: Context, track_index: int, rack_uri: str, kit_path: str) 
     except Exception as e:
         logger.error(f"Error loading drum kit: {str(e)}")
         return f"Error loading drum kit: {str(e)}"
+
+
+@mcp.tool()
+def analyze_audio_file(ctx: Context, file_path: str) -> str:
+    """
+    Analyze a rendered audio file for loudness and peak metrics.
+
+    Parameters:
+    - file_path: Absolute path to a rendered audio file
+    """
+    try:
+        result = _analyze_audio_file_data(file_path)
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error analyzing audio file: {str(e)}")
+        return f"Error analyzing audio file: {str(e)}"
 
 # Main execution
 def main():

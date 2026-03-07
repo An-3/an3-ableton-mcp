@@ -226,6 +226,9 @@ class AbletonMCP(ControlSurface):
             elif command_type == "get_track_info":
                 track_index = params.get("track_index", 0)
                 response["result"] = self._get_track_info(track_index)
+            elif command_type == "get_track_routing":
+                track_index = params.get("track_index", 0)
+                response["result"] = self._get_track_routing(track_index)
             elif command_type == "get_master_meter":
                 response["result"] = self._get_master_meter()
             # Commands that modify Live's state should be scheduled on the main thread
@@ -234,7 +237,8 @@ class AbletonMCP(ControlSurface):
                                  "get_device_parameters", "set_device_parameter",
                                  "create_clip", "add_notes_to_clip", "set_clip_name",
                                  "set_tempo", "fire_clip", "stop_clip",
-                                 "start_playback", "stop_playback", "load_browser_item"]:
+                                 "start_playback", "stop_playback", "load_browser_item",
+                                 "set_track_output_routing"]:
                 # Use a thread-safe approach with a response queue
                 response_queue = queue.Queue()
                 
@@ -305,6 +309,15 @@ class AbletonMCP(ControlSurface):
                             track_index = params.get("track_index", 0)
                             item_uri = params.get("item_uri", "")
                             result = self._load_browser_item(track_index, item_uri)
+                        elif command_type == "set_track_output_routing":
+                            track_index = params.get("track_index", 0)
+                            routing_type_name = params.get("routing_type_name", "")
+                            routing_channel_name = params.get("routing_channel_name", None)
+                            result = self._set_track_output_routing(
+                                track_index,
+                                routing_type_name,
+                                routing_channel_name
+                            )
                         
                         # Put the result in the queue
                         response_queue.put({"status": "success", "result": result})
@@ -507,12 +520,144 @@ class AbletonMCP(ControlSurface):
                 "arm": track.arm,
                 "volume": track.mixer_device.volume.value,
                 "panning": track.mixer_device.panning.value,
+                "routing": self._routing_info_for_track(track),
                 "clip_slots": clip_slots,
                 "devices": devices
             }
             return result
         except Exception as e:
             self.log_message("Error getting track info: " + str(e))
+            raise
+
+    def _serialize_routing_option(self, option):
+        """Normalize a Live routing object/dict into JSON-safe data."""
+        if option is None:
+            return None
+        if isinstance(option, dict):
+            return {
+                "display_name": option.get("display_name", ""),
+                "identifier": option.get("identifier", ""),
+            }
+
+        display_name = ""
+        identifier = ""
+        try:
+            display_name = getattr(option, "display_name", "") or getattr(option, "name", "")
+        except Exception:
+            display_name = ""
+        try:
+            identifier = getattr(option, "identifier", "")
+        except Exception:
+            identifier = ""
+
+        if not display_name and not identifier:
+            try:
+                display_name = unicode(option)
+            except NameError:
+                display_name = str(option)
+
+        return {
+            "display_name": display_name,
+            "identifier": identifier,
+        }
+
+    def _routing_info_for_track(self, track):
+        """Collect current and available routing metadata for a track."""
+        def get_options(attr_name):
+            try:
+                options = getattr(track, attr_name, [])
+                return [self._serialize_routing_option(option) for option in list(options)]
+            except Exception:
+                return []
+
+        def get_current(attr_name):
+            try:
+                return self._serialize_routing_option(getattr(track, attr_name, None))
+            except Exception:
+                return None
+
+        return {
+            "current_output_routing_type": get_current("output_routing_type"),
+            "current_output_routing_channel": get_current("output_routing_channel"),
+            "available_output_routing_types": get_options("available_output_routing_types"),
+            "available_output_routing_channels": get_options("available_output_routing_channels"),
+        }
+
+    def _get_track_routing(self, track_index):
+        """Get output routing information for a track."""
+        try:
+            if track_index < 0 or track_index >= len(self._song.tracks):
+                raise IndexError("Track index out of range")
+            track = self._song.tracks[track_index]
+            return {
+                "index": track_index,
+                "name": track.name,
+                "routing": self._routing_info_for_track(track)
+            }
+        except Exception as e:
+            self.log_message("Error getting track routing: " + str(e))
+            raise
+
+    def _match_routing_option(self, options, name):
+        """Find a routing option by display name or identifier."""
+        if not name:
+            return None
+        wanted = name.strip().lower()
+        for option in list(options):
+            serialized = self._serialize_routing_option(option)
+            display_name = (serialized.get("display_name", "") or "").strip().lower()
+            identifier = (serialized.get("identifier", "") or "").strip().lower()
+            if wanted == display_name or wanted == identifier:
+                return option
+        return None
+
+    def _set_track_output_routing(self, track_index, routing_type_name, routing_channel_name=None):
+        """Set a track's output routing type and optional channel."""
+        try:
+            if track_index < 0 or track_index >= len(self._song.tracks):
+                raise IndexError("Track index out of range")
+
+            track = self._song.tracks[track_index]
+
+            available_types = getattr(track, "available_output_routing_types", [])
+            routing_type = self._match_routing_option(available_types, routing_type_name)
+            if routing_type is None:
+                available_names = [
+                    self._serialize_routing_option(option).get("display_name", "")
+                    for option in list(available_types)
+                ]
+                raise ValueError(
+                    "Unknown output routing type '{0}'. Available: {1}".format(
+                        routing_type_name,
+                        ", ".join([name for name in available_names if name])
+                    )
+                )
+
+            track.output_routing_type = routing_type
+
+            if routing_channel_name:
+                available_channels = getattr(track, "available_output_routing_channels", [])
+                routing_channel = self._match_routing_option(available_channels, routing_channel_name)
+                if routing_channel is None:
+                    available_names = [
+                        self._serialize_routing_option(option).get("display_name", "")
+                        for option in list(available_channels)
+                    ]
+                    raise ValueError(
+                        "Unknown output routing channel '{0}'. Available: {1}".format(
+                            routing_channel_name,
+                            ", ".join([name for name in available_names if name])
+                        )
+                    )
+                track.output_routing_channel = routing_channel
+
+            return {
+                "index": track_index,
+                "name": track.name,
+                "routing": self._routing_info_for_track(track)
+            }
+        except Exception as e:
+            self.log_message("Error setting track output routing: " + str(e))
             raise
     
     def _create_audio_track(self, index):
