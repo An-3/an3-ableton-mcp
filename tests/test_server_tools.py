@@ -1,7 +1,10 @@
+import asyncio
+import importlib
 import json
 import os
 import tempfile
 import unittest
+from contextlib import contextmanager
 from unittest import mock
 
 import numpy as np
@@ -45,6 +48,9 @@ class FakeAbleton:
             "name": name,
             "is_audio_track": True,
             "is_midi_track": False,
+            "mute": False,
+            "solo": False,
+            "arm": False,
             "volume": 0.85,
             "panning": 0.0,
             "devices": [],
@@ -103,6 +109,35 @@ class FakeAbleton:
         params = params or {}
         if command_type == "get_session_info":
             return {"track_count": len(self.tracks)}
+        if command_type == "get_track_summary":
+            track = self.tracks[params["track_index"]]
+            return {
+                "index": track["index"],
+                "name": track["name"],
+                "is_audio_track": track["is_audio_track"],
+                "is_midi_track": track["is_midi_track"],
+                "mute": track["mute"],
+                "solo": track["solo"],
+                "arm": track["arm"],
+                "volume": track["volume"],
+                "panning": track["panning"],
+                "device_count": len(track["devices"]),
+                "clip_slot_count": len(track["clip_slots"]),
+                "playback_state": json.loads(json.dumps(track["playback_state"])),
+                "routing": {
+                    "current_output_routing_type": json.loads(json.dumps(
+                        track["routing"]["current_output_routing_type"]
+                    )),
+                    "current_output_routing_channel": json.loads(json.dumps(
+                        track["routing"]["current_output_routing_channel"]
+                    )),
+                },
+            }
+        if command_type == "list_tracks_summary":
+            return [
+                self.send_command("get_track_summary", {"track_index": track["index"]})
+                for track in self.tracks
+            ]
         if command_type == "get_track_info":
             track = self.tracks[params["track_index"]]
             return {
@@ -110,6 +145,9 @@ class FakeAbleton:
                 "name": track["name"],
                 "is_audio_track": track["is_audio_track"],
                 "is_midi_track": track["is_midi_track"],
+                "mute": track["mute"],
+                "solo": track["solo"],
+                "arm": track["arm"],
                 "volume": track["volume"],
                 "panning": track["panning"],
                 "devices": [dict(device) for device in track["devices"]],
@@ -219,7 +257,118 @@ class FakeAbleton:
         raise AssertionError("Unexpected command: {0}".format(command_type))
 
 
+@contextmanager
+def reloaded_server(tool_profile=None, response_profile=None):
+    original_tool_profile = os.environ.get("ABLETON_MCP_TOOL_PROFILE")
+    original_response_profile = os.environ.get("ABLETON_MCP_RESPONSE_PROFILE")
+    try:
+        if tool_profile is None:
+            os.environ.pop("ABLETON_MCP_TOOL_PROFILE", None)
+        else:
+            os.environ["ABLETON_MCP_TOOL_PROFILE"] = tool_profile
+
+        if response_profile is None:
+            os.environ.pop("ABLETON_MCP_RESPONSE_PROFILE", None)
+        else:
+            os.environ["ABLETON_MCP_RESPONSE_PROFILE"] = response_profile
+
+        module = importlib.reload(server)
+        yield module
+    finally:
+        if original_tool_profile is None:
+            os.environ.pop("ABLETON_MCP_TOOL_PROFILE", None)
+        else:
+            os.environ["ABLETON_MCP_TOOL_PROFILE"] = original_tool_profile
+
+        if original_response_profile is None:
+            os.environ.pop("ABLETON_MCP_RESPONSE_PROFILE", None)
+        else:
+            os.environ["ABLETON_MCP_RESPONSE_PROFILE"] = original_response_profile
+
+        importlib.reload(server)
+
+
+def serialized_tool_manifest(module):
+    tools = asyncio.run(module.mcp.list_tools())
+    payload = [tool.model_dump(by_alias=True, exclude_none=True) for tool in tools]
+    return json.dumps(payload, separators=(",", ":"))
+
+
 class ServerToolsTest(unittest.TestCase):
+    def test_all_profile_tool_manifest_budget_and_whitelist(self):
+        expected_tools = {
+            "get_session_info",
+            "get_track_info",
+            "get_track_routing",
+            "get_transport_state",
+            "list_playing_clips",
+            "list_tracks",
+            "find_track_by_name",
+            "find_reference_tracks",
+            "get_master_meter",
+            "sample_master_meter",
+            "create_midi_track",
+            "create_audio_track",
+            "ensure_premaster_track",
+            "set_track_name",
+            "set_track_volume",
+            "set_track_panning",
+            "set_track_output_routing",
+            "create_premaster_routing",
+            "get_device_parameters",
+            "set_device_parameter",
+            "load_audio_clip",
+            "append_browser_device",
+            "append_mastering_chain",
+            "place_clip_in_arrangement",
+            "create_clip",
+            "add_notes_to_clip",
+            "set_clip_name",
+            "set_tempo",
+            "load_instrument_or_effect",
+            "fire_clip",
+            "stop_clip",
+            "start_playback",
+            "stop_playback",
+            "stop_all_clips",
+            "back_to_arrangement",
+            "verify_arrangement_export_ready",
+            "get_browser_tree",
+            "get_browser_items_at_path",
+            "load_drum_kit",
+            "analyze_audio_file",
+        }
+        with reloaded_server(tool_profile="all") as module:
+            tools = asyncio.run(module.mcp.list_tools())
+            tool_names = {tool.name for tool in tools}
+            manifest = serialized_tool_manifest(module)
+        self.assertEqual(tool_names, expected_tools)
+        self.assertLessEqual(len(manifest), 14000)
+
+    def test_core_profile_tool_manifest_budget_and_whitelist(self):
+        expected_tools = {
+            "get_session_info",
+            "list_tracks",
+            "get_track_info",
+            "create_midi_track",
+            "create_audio_track",
+            "set_track_name",
+            "create_clip",
+            "add_notes_to_clip",
+            "set_tempo",
+            "load_instrument_or_effect",
+            "load_audio_clip",
+            "fire_clip",
+            "start_playback",
+            "stop_playback",
+        }
+        with reloaded_server(tool_profile="core") as module:
+            tools = asyncio.run(module.mcp.list_tools())
+            tool_names = {tool.name for tool in tools}
+            manifest = serialized_tool_manifest(module)
+        self.assertEqual(tool_names, expected_tools)
+        self.assertLessEqual(len(manifest), 6000)
+
     def test_analyze_audio_file_returns_loudness_metrics(self):
         sample_rate = 48000
         signal = 0.1 * np.sin(2.0 * np.pi * 440.0 * np.arange(sample_rate * 4) / sample_rate)
@@ -262,6 +411,84 @@ class ServerToolsTest(unittest.TestCase):
         self.assertTrue(result["is_clipping"])
         self.assertAlmostEqual(result["max_peak_linear"], 1.1)
         self.assertEqual(result["sample_count"], 3)
+
+    def test_compat_profile_preserves_existing_verbose_keys(self):
+        fake = FakeAbleton()
+        with reloaded_server(response_profile="compat") as module:
+            with mock.patch.object(module, "get_ableton_connection", return_value=fake):
+                track_payload = json.loads(module.get_track_info(None, 0))
+                ready_payload = json.loads(module.verify_arrangement_export_ready(None))
+                chain_payload = json.loads(module.append_mastering_chain(None, 0, "MINIMAL_TOUCH"))
+                arrangement_payload = json.loads(module.back_to_arrangement(None))
+        self.assertIn("clip_slots", track_payload)
+        self.assertIn("devices", track_payload)
+        self.assertIn("transport_state", ready_payload)
+        self.assertIn("playing_clips", ready_payload)
+        self.assertIn("steps", chain_payload)
+        self.assertIn("final_devices", chain_payload)
+        self.assertIn("transport_state", arrangement_payload)
+        self.assertIn("playing_clips_before", arrangement_payload)
+
+    def test_compact_profile_reduces_track_meter_and_arrangement_payloads(self):
+        fake = FakeAbleton()
+        compat_meter_values = [
+            {"peak_linear": 0.5, "level_linear": 0.4, "is_clipping": False},
+            {"peak_linear": 1.1, "level_linear": 0.9, "is_clipping": True},
+            {"peak_linear": 0.9, "level_linear": 0.7, "is_clipping": False},
+        ]
+        compact_meter_values = json.loads(json.dumps(compat_meter_values))
+
+        with reloaded_server(response_profile="compat") as module:
+            fake.meter_values = json.loads(json.dumps(compat_meter_values))
+            with mock.patch.object(module, "get_ableton_connection", return_value=fake):
+                compat_track = module.get_track_info(None, 0)
+                compat_ready = module.verify_arrangement_export_ready(None)
+                compat_arrangement = module.back_to_arrangement(None)
+                with mock.patch("time.sleep", return_value=None):
+                    compat_meter = module.sample_master_meter(None, duration_seconds=0.3, interval_ms=100)
+
+        fake = FakeAbleton()
+        with reloaded_server(response_profile="compact") as module:
+            fake.meter_values = json.loads(json.dumps(compact_meter_values))
+            with mock.patch.object(module, "get_ableton_connection", return_value=fake):
+                compact_track_raw = module.get_track_info(None, 0)
+                compact_ready_raw = module.verify_arrangement_export_ready(None)
+                compact_arrangement_raw = module.back_to_arrangement(None)
+                with mock.patch("time.sleep", return_value=None):
+                    compact_meter_raw = module.sample_master_meter(None, duration_seconds=0.3, interval_ms=100)
+
+        compact_track = json.loads(compact_track_raw)
+        compact_ready = json.loads(compact_ready_raw)
+        compact_arrangement = json.loads(compact_arrangement_raw)
+        compact_meter = json.loads(compact_meter_raw)
+
+        self.assertLess(len(compact_track_raw), len(compat_track))
+        self.assertLess(len(compact_ready_raw), len(compat_ready))
+        self.assertLess(len(compact_arrangement_raw), len(compat_arrangement))
+        self.assertLess(len(compact_meter_raw), len(compat_meter))
+
+        self.assertNotIn("clip_slots", compact_track)
+        self.assertNotIn("devices", compact_track)
+        self.assertNotIn("available_output_routing_types", compact_track["routing"])
+        self.assertNotIn("transport_state", compact_ready)
+        self.assertNotIn("playing_clips", compact_ready)
+        self.assertNotIn("transport_state", compact_arrangement)
+        self.assertNotIn("playing_clips_before", compact_arrangement)
+        self.assertNotIn("samples", compact_meter)
+
+    def test_compact_profile_returns_compact_chain_and_track_list_payloads(self):
+        fake = FakeAbleton()
+        with reloaded_server(response_profile="compact") as module:
+            with mock.patch.object(module, "get_ableton_connection", return_value=fake):
+                chain_payload = json.loads(module.append_mastering_chain(None, 0, "MINIMAL_TOUCH"))
+                track_list_payload = json.loads(module.list_tracks(None))
+        self.assertEqual(chain_payload["loaded_count"], 3)
+        self.assertEqual(chain_payload["final_device_count"], 3)
+        self.assertNotIn("steps", chain_payload)
+        self.assertNotIn("final_devices", chain_payload)
+        self.assertIn("clip_slot_count", track_list_payload[0])
+        self.assertIn("mute", track_list_payload[0])
+        self.assertNotIn("available_output_routing_types", track_list_payload[0]["routing"])
 
     def test_create_premaster_routing_excludes_reference_tracks(self):
         fake = FakeAbleton()

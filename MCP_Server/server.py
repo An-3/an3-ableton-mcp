@@ -14,6 +14,149 @@ logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("AbletonMCPServer")
 
+VALID_TOOL_PROFILES = {"all", "core"}
+VALID_RESPONSE_PROFILES = {"compat", "compact"}
+DEFAULT_TOOL_PROFILE = "all"
+DEFAULT_RESPONSE_PROFILE = "compat"
+CORE_TOOL_NAMES = {
+    "get_session_info",
+    "list_tracks",
+    "get_track_info",
+    "create_midi_track",
+    "create_audio_track",
+    "set_track_name",
+    "create_clip",
+    "add_notes_to_clip",
+    "set_tempo",
+    "load_instrument_or_effect",
+    "load_audio_clip",
+    "fire_clip",
+    "start_playback",
+    "stop_playback",
+}
+TOOL_DESCRIPTIONS = {
+    "get_session_info": "Get the current session tempo, signature, and track counts.",
+    "get_track_info": "Get detailed information about one track.",
+    "get_track_routing": "Get the current output routing for one track.",
+    "get_transport_state": "Get transport state and arrangement export readiness.",
+    "list_playing_clips": "List the session clips that are currently active.",
+    "list_tracks": "List tracks with stable metadata.",
+    "find_track_by_name": "Find a track by exact name.",
+    "find_reference_tracks": "Find tracks whose names look like references.",
+    "get_master_meter": "Get the current master output meter values.",
+    "sample_master_meter": "Sample the master meter and report peak values.",
+    "create_midi_track": "Create a MIDI track.",
+    "create_audio_track": "Create an audio track.",
+    "ensure_premaster_track": "Create or reuse a premaster track.",
+    "set_track_name": "Rename a track.",
+    "set_track_volume": "Set a track volume value.",
+    "set_track_panning": "Set a track pan value.",
+    "set_track_output_routing": "Set a track output routing target.",
+    "create_premaster_routing": "Route tracks through a premaster track.",
+    "get_device_parameters": "List parameters for a device on a track.",
+    "set_device_parameter": "Set a device parameter value.",
+    "load_audio_clip": "Load an audio file into a clip slot.",
+    "append_browser_device": "Append a browser item to a track device chain.",
+    "append_mastering_chain": "Append a stock mastering chain to a track.",
+    "place_clip_in_arrangement": "Place a session clip into the arrangement.",
+    "create_clip": "Create a MIDI clip in a clip slot.",
+    "add_notes_to_clip": "Add notes to a MIDI clip.",
+    "set_clip_name": "Rename a clip.",
+    "set_tempo": "Set the session tempo.",
+    "load_instrument_or_effect": "Load a browser item onto a track.",
+    "fire_clip": "Start a clip.",
+    "stop_clip": "Stop a clip.",
+    "start_playback": "Start session playback.",
+    "stop_playback": "Stop session playback.",
+    "stop_all_clips": "Stop all session clips.",
+    "back_to_arrangement": "Return playback to the arrangement.",
+    "verify_arrangement_export_ready": "Check whether arrangement export is safe.",
+    "get_browser_tree": "Browse the top-level Ableton browser tree.",
+    "get_browser_items_at_path": "List browser items at a specific path.",
+    "load_drum_kit": "Load a drum rack and a drum kit.",
+    "analyze_audio_file": "Analyze a rendered audio file for loudness and peaks.",
+}
+
+
+def _normalize_profile(value: Optional[str], allowed: set[str], default: str, env_name: str) -> str:
+    normalized = (value or default).strip().lower()
+    if normalized in allowed:
+        return normalized
+    logger.warning("Invalid %s value '%s'; defaulting to '%s'", env_name, value, default)
+    return default
+
+
+def _active_tool_profile() -> str:
+    return _normalize_profile(
+        os.getenv("ABLETON_MCP_TOOL_PROFILE"),
+        VALID_TOOL_PROFILES,
+        DEFAULT_TOOL_PROFILE,
+        "ABLETON_MCP_TOOL_PROFILE",
+    )
+
+
+def _active_response_profile() -> str:
+    return _normalize_profile(
+        os.getenv("ABLETON_MCP_RESPONSE_PROFILE"),
+        VALID_RESPONSE_PROFILES,
+        DEFAULT_RESPONSE_PROFILE,
+        "ABLETON_MCP_RESPONSE_PROFILE",
+    )
+
+
+def _compact_response_enabled() -> bool:
+    return _active_response_profile() == "compact"
+
+
+def _should_register_tool(tool_name: str) -> bool:
+    profile = _active_tool_profile()
+    return profile == "all" or tool_name in CORE_TOOL_NAMES
+
+
+def _tool_description(tool_name: str, explicit: Optional[str], docstring: Optional[str]) -> str:
+    if explicit:
+        return explicit.strip()
+    if tool_name in TOOL_DESCRIPTIONS:
+        return TOOL_DESCRIPTIONS[tool_name]
+    if docstring:
+        return docstring.strip().splitlines()[0]
+    return tool_name.replace("_", " ")
+
+
+class AbletonFastMCP(FastMCP):
+    def tool(
+        self,
+        name: Optional[str] = None,
+        title: Optional[str] = None,
+        description: Optional[str] = None,
+        annotations=None,
+        icons=None,
+        meta: Optional[Dict[str, Any]] = None,
+        structured_output: Optional[bool] = None,
+    ):
+        if callable(name):
+            raise TypeError(
+                "The @tool decorator was used incorrectly. Use @tool() instead of @tool."
+            )
+
+        def decorator(fn):
+            tool_name = name or fn.__name__
+            if not _should_register_tool(tool_name):
+                return fn
+            self.add_tool(
+                fn,
+                name=name,
+                title=title,
+                description=_tool_description(tool_name, description, fn.__doc__),
+                annotations=annotations,
+                icons=icons,
+                meta=meta,
+                structured_output=False if structured_output is None else structured_output,
+            )
+            return fn
+
+        return decorator
+
 @dataclass
 class AbletonConnection:
     host: str
@@ -190,7 +333,7 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
         logger.info("AbletonMCP server shut down")
 
 # Create the MCP server with lifespan support
-mcp = FastMCP(
+mcp = AbletonFastMCP(
     "AbletonMCP",
     instructions="Ableton Live integration through the Model Context Protocol",
     lifespan=server_lifespan
@@ -325,6 +468,167 @@ def _linear_to_db(value: float) -> float:
     return 20.0 * math.log10(value)
 
 
+def _json_response(data: Any) -> str:
+    return json.dumps(data, separators=(",", ":"), ensure_ascii=True)
+
+
+def _current_routing_payload(routing: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    routing = routing or {}
+    return {
+        "current_output_routing_type": routing.get("current_output_routing_type"),
+        "current_output_routing_channel": routing.get("current_output_routing_channel"),
+    }
+
+
+def _compact_routing_payload(track_routing: Dict[str, Any]) -> Dict[str, Any]:
+    routing = track_routing.get("routing", {}) or {}
+    return {
+        "index": track_routing.get("index"),
+        "name": track_routing.get("name"),
+        "routing": {
+            **_current_routing_payload(routing),
+            "available_output_routing_type_count": len(routing.get("available_output_routing_types", []) or []),
+            "available_output_routing_channel_count": len(routing.get("available_output_routing_channels", []) or []),
+        },
+    }
+
+
+def _compact_track_summary(track: Dict[str, Any]) -> Dict[str, Any]:
+    playback_state = track.get("playback_state", {}) or {}
+    clip_slots = track.get("clip_slots", []) or []
+    devices = track.get("devices", []) or []
+    return {
+        "index": track.get("index"),
+        "name": track.get("name"),
+        "is_audio_track": track.get("is_audio_track"),
+        "is_midi_track": track.get("is_midi_track"),
+        "mute": track.get("mute"),
+        "solo": track.get("solo"),
+        "arm": track.get("arm"),
+        "volume": track.get("volume"),
+        "panning": track.get("panning"),
+        "device_count": track.get("device_count", len(devices)),
+        "clip_slot_count": track.get("clip_slot_count", len(clip_slots)),
+        "playback_state": {
+            "playing_slot_index": playback_state.get("playing_slot_index"),
+            "fired_slot_index": playback_state.get("fired_slot_index"),
+            "arrangement_playing": playback_state.get("arrangement_playing"),
+            "track_stopped": playback_state.get("track_stopped"),
+        },
+        "routing": _current_routing_payload(track.get("routing")),
+    }
+
+
+def _compact_transport_summary(transport_state: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "is_playing": transport_state.get("is_playing"),
+        "current_song_time": transport_state.get("current_song_time"),
+        "playing_clip_count": transport_state.get("playing_clip_count"),
+        "arrangement_state_known": transport_state.get("arrangement_state_known"),
+        "session_override_active": transport_state.get("session_override_active"),
+        "session_override_detection": transport_state.get("session_override_detection"),
+        "back_to_arrangement_source": transport_state.get("back_to_arrangement_source"),
+        "arrangement_export_ready": transport_state.get("arrangement_export_ready"),
+    }
+
+
+def _compact_stop_all_clips_result(result: Dict[str, Any]) -> Dict[str, Any]:
+    transport_state = result.get("transport_state", {}) or {}
+    return {
+        "method": result.get("method"),
+        "stopped": result.get("stopped"),
+        "playing_clip_count_before": result.get("playing_clip_count_before"),
+        "playing_clip_count_after": result.get("playing_clip_count_after"),
+        "session_override_active": transport_state.get("session_override_active"),
+        "arrangement_export_ready": transport_state.get("arrangement_export_ready"),
+    }
+
+
+def _compact_back_to_arrangement_result(result: Dict[str, Any]) -> Dict[str, Any]:
+    compact = {
+        "method": result.get("method"),
+        "action": result.get("action"),
+        "fallback_used": result.get("fallback_used"),
+        "playing_clip_count_before": len(result.get("playing_clips_before", []) or []),
+        "playing_clip_count_after": len(result.get("playing_clips_after", []) or []),
+        "arrangement_export_ready": result.get("arrangement_export_ready"),
+    }
+    if result.get("warning"):
+        compact["warning"] = result.get("warning")
+    return compact
+
+
+def _compact_browser_items_payload(result: Dict[str, Any]) -> Dict[str, Any]:
+    items = result.get("items", []) or []
+    capped_items = items[:25]
+    return {
+        "path": result.get("path"),
+        "name": result.get("name"),
+        "uri": result.get("uri"),
+        "is_folder": result.get("is_folder"),
+        "is_device": result.get("is_device"),
+        "is_loadable": result.get("is_loadable"),
+        "total_items": len(items),
+        "truncated": len(capped_items) < len(items),
+        "items": capped_items,
+    }
+
+
+def _compact_append_browser_device_result(result: Dict[str, Any]) -> Dict[str, Any]:
+    appended_names = result.get("appended_devices", []) or []
+    final_names = result.get("devices_after", []) or []
+    return {
+        "track_index": result.get("track_index"),
+        "item_uri": result.get("item_uri"),
+        "loaded": result.get("loaded"),
+        "item_name": result.get("item_name"),
+        "appended_device_names": appended_names,
+        "final_device_count": len(final_names),
+    }
+
+
+def _compact_append_mastering_chain_result(result: Dict[str, Any]) -> Dict[str, Any]:
+    steps = result.get("steps", []) or []
+    appended_device_names = []
+    loaded_count = 0
+    for step in steps:
+        if step.get("loaded"):
+            loaded_count += 1
+        appended_device_names.extend(step.get("appended_devices", []) or [])
+    return {
+        "track_index": result.get("track_index"),
+        "preset_name": result.get("preset_name"),
+        "loaded_count": loaded_count,
+        "appended_device_names": appended_device_names,
+        "final_device_count": len(result.get("final_devices", []) or []),
+    }
+
+
+def _track_payload_for_response(track: Dict[str, Any]) -> Dict[str, Any]:
+    if _compact_response_enabled():
+        return _compact_track_summary(track)
+    return track
+
+
+def _tracks_payload_for_response(tracks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if _compact_response_enabled():
+        return [_compact_track_summary(track) for track in tracks]
+    result = []
+    for track in tracks:
+        result.append({
+            "index": track.get("index"),
+            "name": track.get("name"),
+            "is_audio_track": track.get("is_audio_track"),
+            "is_midi_track": track.get("is_midi_track"),
+            "volume": track.get("volume"),
+            "panning": track.get("panning"),
+            "device_count": len(track.get("devices", [])),
+            "routing": track.get("routing"),
+            "playback_state": track.get("playback_state"),
+        })
+    return result
+
+
 def _list_tracks_data(ableton: AbletonConnection) -> List[Dict[str, Any]]:
     session = ableton.send_command("get_session_info")
     track_count = int(session.get("track_count", 0))
@@ -332,6 +636,16 @@ def _list_tracks_data(ableton: AbletonConnection) -> List[Dict[str, Any]]:
     for track_index in range(track_count):
         tracks.append(ableton.send_command("get_track_info", {"track_index": track_index}))
     return tracks
+
+
+def _list_track_summaries_data(ableton: AbletonConnection) -> List[Dict[str, Any]]:
+    result = ableton.send_command("list_tracks_summary")
+    return result or []
+
+
+def _get_track_data(ableton: AbletonConnection, track_index: int, summary: bool = False) -> Dict[str, Any]:
+    command_type = "get_track_summary" if summary else "get_track_info"
+    return ableton.send_command(command_type, {"track_index": track_index})
 
 
 def _get_transport_state_data(ableton: AbletonConnection) -> Dict[str, Any]:
@@ -413,7 +727,8 @@ def _ensure_premaster_track_data(
     ableton: AbletonConnection,
     premaster_name: str = "PREMASTER"
 ) -> Dict[str, Any]:
-    tracks = _list_tracks_data(ableton)
+    use_summary = _compact_response_enabled()
+    tracks = _list_track_summaries_data(ableton) if use_summary else _list_tracks_data(ableton)
     existing = _find_track_by_name_data(tracks, premaster_name)
     if existing:
         return {"created": False, "track": existing}
@@ -427,7 +742,7 @@ def _ensure_premaster_track_data(
         "track_index": track_index,
         "name": premaster_name,
     })
-    track = ableton.send_command("get_track_info", {"track_index": track_index})
+    track = _get_track_data(ableton, track_index, summary=use_summary)
     return {"created": True, "track": track}
 
 
@@ -551,7 +866,7 @@ def get_session_info(ctx: Context) -> str:
     try:
         ableton = get_ableton_connection()
         result = ableton.send_command("get_session_info")
-        return json.dumps(result, indent=2)
+        return _json_response(result)
     except Exception as e:
         logger.error(f"Error getting session info from Ableton: {str(e)}")
         return f"Error getting session info: {str(e)}"
@@ -566,8 +881,8 @@ def get_track_info(ctx: Context, track_index: int) -> str:
     """
     try:
         ableton = get_ableton_connection()
-        result = ableton.send_command("get_track_info", {"track_index": track_index})
-        return json.dumps(result, indent=2)
+        result = _get_track_data(ableton, track_index, summary=_compact_response_enabled())
+        return _json_response(_track_payload_for_response(result))
     except Exception as e:
         logger.error(f"Error getting track info from Ableton: {str(e)}")
         return f"Error getting track info: {str(e)}"
@@ -584,7 +899,9 @@ def get_track_routing(ctx: Context, track_index: int) -> str:
     try:
         ableton = get_ableton_connection()
         result = ableton.send_command("get_track_routing", {"track_index": track_index})
-        return json.dumps(result, indent=2)
+        if _compact_response_enabled():
+            return _json_response(_compact_routing_payload(result))
+        return _json_response(result)
     except Exception as e:
         logger.error(f"Error getting track routing from Ableton: {str(e)}")
         return f"Error getting track routing: {str(e)}"
@@ -596,7 +913,9 @@ def get_transport_state(ctx: Context) -> str:
     try:
         ableton = get_ableton_connection()
         result = _get_transport_state_data(ableton)
-        return json.dumps(result, indent=2)
+        if _compact_response_enabled():
+            return _json_response(_compact_transport_summary(result))
+        return _json_response(result)
     except Exception as e:
         logger.error(f"Error getting transport state: {str(e)}")
         return f"Error getting transport state: {str(e)}"
@@ -608,7 +927,12 @@ def list_playing_clips(ctx: Context) -> str:
     try:
         ableton = get_ableton_connection()
         result = _list_playing_clips_data(ableton)
-        return json.dumps(result, indent=2)
+        if _compact_response_enabled():
+            return _json_response({
+                "count": result.get("count", 0),
+                "playing_clips": result.get("playing_clips", []),
+            })
+        return _json_response(result)
     except Exception as e:
         logger.error(f"Error listing playing clips: {str(e)}")
         return f"Error listing playing clips: {str(e)}"
@@ -619,21 +943,8 @@ def list_tracks(ctx: Context) -> str:
     """List the current tracks with stable metadata."""
     try:
         ableton = get_ableton_connection()
-        tracks = _list_tracks_data(ableton)
-        result = []
-        for track in tracks:
-            result.append({
-                "index": track.get("index"),
-                "name": track.get("name"),
-                "is_audio_track": track.get("is_audio_track"),
-                "is_midi_track": track.get("is_midi_track"),
-                "volume": track.get("volume"),
-                "panning": track.get("panning"),
-                "device_count": len(track.get("devices", [])),
-                "routing": track.get("routing"),
-                "playback_state": track.get("playback_state"),
-            })
-        return json.dumps(result, indent=2)
+        tracks = _list_track_summaries_data(ableton) if _compact_response_enabled() else _list_tracks_data(ableton)
+        return _json_response(_tracks_payload_for_response(tracks))
     except Exception as e:
         logger.error(f"Error listing tracks: {str(e)}")
         return f"Error listing tracks: {str(e)}"
@@ -649,11 +960,11 @@ def find_track_by_name(ctx: Context, name: str) -> str:
     """
     try:
         ableton = get_ableton_connection()
-        tracks = _list_tracks_data(ableton)
+        tracks = _list_track_summaries_data(ableton) if _compact_response_enabled() else _list_tracks_data(ableton)
         match = _find_track_by_name_data(tracks, name)
         if match is None:
             return f"No track found with name '{name}'"
-        return json.dumps(match, indent=2)
+        return _json_response(_track_payload_for_response(match))
     except Exception as e:
         logger.error(f"Error finding track by name: {str(e)}")
         return f"Error finding track by name: {str(e)}"
@@ -664,9 +975,9 @@ def find_reference_tracks(ctx: Context) -> str:
     """Find tracks whose names suggest they are references."""
     try:
         ableton = get_ableton_connection()
-        tracks = _list_tracks_data(ableton)
+        tracks = _list_track_summaries_data(ableton) if _compact_response_enabled() else _list_tracks_data(ableton)
         matches = _find_reference_tracks_data(tracks)
-        return json.dumps(matches, indent=2)
+        return _json_response([_track_payload_for_response(track) for track in matches])
     except Exception as e:
         logger.error(f"Error finding reference tracks: {str(e)}")
         return f"Error finding reference tracks: {str(e)}"
@@ -679,7 +990,7 @@ def get_master_meter(ctx: Context) -> str:
     try:
         ableton = get_ableton_connection()
         result = ableton.send_command("get_master_meter")
-        return json.dumps(result, indent=2)
+        return _json_response(result)
     except Exception as e:
         logger.error(f"Error getting master meter from Ableton: {str(e)}")
         return f"Error getting master meter: {str(e)}"
@@ -720,7 +1031,18 @@ def sample_master_meter(ctx: Context, duration_seconds: float = 5.0, interval_ms
             "is_clipping": any(bool(sample.get("is_clipping")) for sample in samples),
             "samples": samples,
         }
-        return json.dumps(result, indent=2)
+        if _compact_response_enabled():
+            result = {
+                "duration_seconds": result["duration_seconds"],
+                "interval_ms": result["interval_ms"],
+                "sample_count": result["sample_count"],
+                "max_peak_linear": result["max_peak_linear"],
+                "max_peak_db": result["max_peak_db"],
+                "max_level_linear": result["max_level_linear"],
+                "max_level_db": result["max_level_db"],
+                "is_clipping": result["is_clipping"],
+            }
+        return _json_response(result)
     except Exception as e:
         logger.error(f"Error sampling master meter: {str(e)}")
         return f"Error sampling master meter: {str(e)}"
@@ -770,7 +1092,12 @@ def ensure_premaster_track(ctx: Context, name: str = "PREMASTER") -> str:
     try:
         ableton = get_ableton_connection()
         result = _ensure_premaster_track_data(ableton, name)
-        return json.dumps(result, indent=2)
+        if _compact_response_enabled():
+            result = {
+                "created": result.get("created"),
+                "track": _compact_track_summary(result.get("track", {})),
+            }
+        return _json_response(result)
     except Exception as e:
         logger.error(f"Error ensuring premaster track: {str(e)}")
         return f"Error ensuring premaster track: {str(e)}"
@@ -805,7 +1132,7 @@ def set_track_volume(ctx: Context, track_index: int, volume: float) -> str:
     try:
         ableton = get_ableton_connection()
         result = ableton.send_command("set_track_volume", {"track_index": track_index, "volume": volume})
-        return json.dumps(result)
+        return _json_response(result)
     except Exception as e:
         logger.error(f"Error setting track volume: {str(e)}")
         return f"Error setting track volume: {str(e)}"
@@ -822,7 +1149,7 @@ def set_track_panning(ctx: Context, track_index: int, panning: float) -> str:
     try:
         ableton = get_ableton_connection()
         result = ableton.send_command("set_track_panning", {"track_index": track_index, "panning": panning})
-        return json.dumps(result)
+        return _json_response(result)
     except Exception as e:
         logger.error(f"Error setting track panning: {str(e)}")
         return f"Error setting track panning: {str(e)}"
@@ -850,7 +1177,9 @@ def set_track_output_routing(
             "routing_type_name": routing_type_name,
             "routing_channel_name": routing_channel_name,
         })
-        return json.dumps(result, indent=2)
+        if _compact_response_enabled():
+            return _json_response(_compact_routing_payload(result))
+        return _json_response(result)
     except Exception as e:
         logger.error(f"Error setting track output routing: {str(e)}")
         return f"Error setting track output routing: {str(e)}"
@@ -877,7 +1206,7 @@ def create_premaster_routing(
         premaster_track = premaster_result["track"]
         premaster_index = premaster_track["index"]
 
-        tracks = _list_tracks_data(ableton)
+        tracks = _list_track_summaries_data(ableton)
         exclude_indices = set(exclude_track_indices or [])
         exclude_indices.add(premaster_index)
 
@@ -922,7 +1251,7 @@ def create_premaster_routing(
             "auto_reference_track_indices": sorted(auto_reference_indices),
             "premaster_output_target": main_output_name,
         }
-        return json.dumps(result, indent=2)
+        return _json_response(result)
     except Exception as e:
         logger.error(f"Error creating premaster routing: {str(e)}")
         return f"Error creating premaster routing: {str(e)}"
@@ -941,7 +1270,7 @@ def get_device_parameters(ctx: Context, track_index: int, device_index: int) -> 
         result = ableton.send_command("get_device_parameters", {
             "track_index": track_index, "device_index": device_index
         })
-        return json.dumps(result, indent=2)
+        return _json_response(result)
     except Exception as e:
         logger.error(f"Error getting device parameters: {str(e)}")
         return f"Error getting device parameters: {str(e)}"
@@ -963,7 +1292,7 @@ def set_device_parameter(ctx: Context, track_index: int, device_index: int, para
             "track_index": track_index, "device_index": device_index,
             "parameter_index": parameter_index, "value": value
         })
-        return json.dumps(result)
+        return _json_response(result)
     except Exception as e:
         logger.error(f"Error setting device parameter: {str(e)}")
         return f"Error setting device parameter: {str(e)}"
@@ -1009,7 +1338,9 @@ def append_browser_device(ctx: Context, track_index: int, item_uri: str) -> str:
     try:
         ableton = get_ableton_connection()
         result = _append_browser_device_data(ableton, track_index, item_uri)
-        return json.dumps(result, indent=2)
+        if _compact_response_enabled():
+            return _json_response(_compact_append_browser_device_result(result))
+        return _json_response(result)
     except Exception as e:
         logger.error(f"Error appending browser device: {str(e)}")
         return f"Error appending browser device: {str(e)}"
@@ -1043,7 +1374,9 @@ def append_mastering_chain(ctx: Context, track_index: int, preset_name: str) -> 
             "steps": appended,
             "final_devices": final_track.get("devices", []),
         }
-        return json.dumps(result, indent=2)
+        if _compact_response_enabled():
+            return _json_response(_compact_append_mastering_chain_result(result))
+        return _json_response(result)
     except Exception as e:
         logger.error(f"Error appending mastering chain: {str(e)}")
         return f"Error appending mastering chain: {str(e)}"
@@ -1262,7 +1595,9 @@ def stop_all_clips(ctx: Context) -> str:
     try:
         ableton = get_ableton_connection()
         result = ableton.send_command("stop_all_clips")
-        return json.dumps(result, indent=2)
+        if _compact_response_enabled():
+            return _json_response(_compact_stop_all_clips_result(result))
+        return _json_response(result)
     except Exception as e:
         logger.error(f"Error stopping all clips: {str(e)}")
         return f"Error stopping all clips: {str(e)}"
@@ -1274,7 +1609,9 @@ def back_to_arrangement(ctx: Context) -> str:
     try:
         ableton = get_ableton_connection()
         result = ableton.send_command("back_to_arrangement")
-        return json.dumps(result, indent=2)
+        if _compact_response_enabled():
+            return _json_response(_compact_back_to_arrangement_result(result))
+        return _json_response(result)
     except Exception as e:
         logger.error(f"Error restoring Arrangement playback: {str(e)}")
         return f"Error restoring Arrangement playback: {str(e)}"
@@ -1286,7 +1623,14 @@ def verify_arrangement_export_ready(ctx: Context) -> str:
     try:
         ableton = get_ableton_connection()
         result = _verify_arrangement_export_ready_data(ableton)
-        return json.dumps(result, indent=2)
+        if _compact_response_enabled():
+            result = {
+                "ready": result.get("ready"),
+                "issues": result.get("issues", []),
+                "verification_level": result.get("verification_level"),
+                "recommended_action": result.get("recommended_action"),
+            }
+        return _json_response(result)
     except Exception as e:
         logger.error(f"Error verifying Arrangement export readiness: {str(e)}")
         return f"Error verifying Arrangement export readiness: {str(e)}"
@@ -1375,8 +1719,10 @@ def get_browser_items_at_path(ctx: Context, path: str) -> str:
             available_cats = result.get("available_categories", [])
             return (f"Error: {error}\n"
                    f"Available browser categories: {', '.join(available_cats)}")
-        
-        return json.dumps(result, indent=2)
+
+        if _compact_response_enabled():
+            return _json_response(_compact_browser_items_payload(result))
+        return _json_response(result)
     except Exception as e:
         error_msg = str(e)
         if "Browser is not available" in error_msg:
@@ -1455,7 +1801,7 @@ def analyze_audio_file(ctx: Context, file_path: str) -> str:
     """
     try:
         result = _analyze_audio_file_data(file_path)
-        return json.dumps(result, indent=2)
+        return _json_response(result)
     except Exception as e:
         logger.error(f"Error analyzing audio file: {str(e)}")
         return f"Error analyzing audio file: {str(e)}"

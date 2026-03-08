@@ -27,37 +27,33 @@ https://github.com/user-attachments/assets/d6ef2de5-bdeb-4097-acc0-67d70f7f85b3
 
 ## Key Features
 
-This project provides comprehensive, programmatic control over the Ableton Live environment.
+This project provides programmatic control over the Ableton Live environment.
 
 * **Session and Transport Control:**
     * Start and stop playback.
     * Get session info, including tempo, time signature, and track count.
-    * Manage scenes: create, delete, rename, and fire.
+    * Set session tempo.
 
 * **Track Management:**
-    * Create, rename, and get detailed information for MIDI and audio tracks.
-    * Control track properties: volume, panning, mute, solo, and arm.
-    * Manage track grouping and folding states.
+    * Create and rename MIDI tracks.
+    * Get detailed track information.
+    * Control track volume and panning.
+    * Get master track meter levels.
 
 * **MIDI Clip and Note Manipulation:**
     * Create and name MIDI clips with specified lengths.
-    * Add, delete, transpose, and quantize notes within clips.
-    * Perform batch edits on multiple notes in a single operation.
-    * Adjust clip loop parameters and follow actions.
+    * Add notes to clips.
+    * Fire and stop clips.
 
 * **Device and Parameter Control:**
     * Load instruments and effects from Ableton's browser by URI.
     * Get a full list of parameters for any device on a track.
-    * Set and batch-set device parameters using normalized values (0.0 to 1.0).
-
-* **Automation and Envelopes:**
-    * Add and clear automation points for any device parameter within a clip. [This feature isn't working perfectly yet.]
-    * Get information about existing clip envelopes.
+    * Set device parameters using normalized values (0.0 to 1.0).
 
 * **Browser Integration:**
-    * Navigate and list items from Ableton's browser.
+    * Navigate and list items from Ableton's browser tree.
     * Load instruments, effects, and samples directly from a browser path or URI.
-    * Import audio files directly into audio tracks or clip slots.
+    * Load drum racks and drum kits.
 
 * **Voice & Audio Generation** 
     * Text-to-Speech Integration: Generate narration, vocal samples, or spoken elements through ElevenLabs MCP [included].
@@ -81,8 +77,8 @@ This project provides comprehensive, programmatic control over the Ableton Live 
 
 ### 1. **Get the Code**
 ```bash
-git clone https://github.com/uisato/ableton-mcp-extended.git
-cd ableton-mcp-extended
+git clone https://github.com/An-3/an3-ableton-mcp.git
+cd an3-ableton-mcp
 pip install -e .
 ```
 
@@ -107,7 +103,11 @@ pip install -e .
   "mcpServers": {
     "AbletonMCP": {
       "command": "python",
-      "args": ["C:/path/to/ableton-mcp-extended/MCP_Server/server.py"]
+      "args": ["C:/path/to/an3-ableton-mcp/MCP_Server/server.py"],
+      "env": {
+        "ABLETON_MCP_TOOL_PROFILE": "all",
+        "ABLETON_MCP_RESPONSE_PROFILE": "compat"
+      }
     }
   }
 }
@@ -115,6 +115,16 @@ pip install -e .
 
 **For Cursor:**
 Add MCP server in Settings → MCP with the same path.
+
+`ABLETON_MCP_TOOL_PROFILE` controls how many tools are exposed:
+- `all` keeps the full 40-tool surface and is the default.
+- `core` exposes a lean 14-tool set: `get_session_info`, `list_tracks`, `get_track_info`, `create_midi_track`, `create_audio_track`, `set_track_name`, `create_clip`, `add_notes_to_clip`, `set_tempo`, `load_instrument_or_effect`, `load_audio_clip`, `fire_clip`, `start_playback`, `stop_playback`.
+
+`ABLETON_MCP_RESPONSE_PROFILE` controls tool payload size:
+- `compat` keeps the existing response shapes and is the default.
+- `compact` returns smaller summaries for the token-heavy read tools and receipts.
+
+Use `all + compat` if you want maximum compatibility. Use `core + compact` if you want the lowest token usage.
 
 ### 5. **Start Creating!** 
 Open your AI assistant and try:
@@ -243,22 +253,20 @@ This project includes several specialized components:
 - **Discussions**: Share your creations and get help
 
 ### **Share Your Creations**
-Tag me with your AI-generated experiments! I love seeing what the community creates:
-
-[YouTube](https://www.youtube.com/@uisato_) |
-[Instagram](https://www.instagram.com/uisato_) |
-[Patreon](https://www.patreon.com/c/uisato) |
-[Website](https://www.uisato.art/) 
+Share your AI-generated experiments in GitHub Discussions!
 
 ---
 
 ## What's Next
 
-- **Fixing Automation Point Placement Bugs**
-- **VST Plugin Support** - Control third-party plugins [Though it can be achieved throught the "Configure" parameter function]
+- **Audio Track Import** - Create audio tracks, load audio clips, and place them in the arrangement (remote script support complete, MCP tools in progress)
+- **Extended Track Control** - Mute, solo, arm, grouping, and folding
+- **Extended Clip/Note Editing** - Delete, transpose, quantize notes; loop and follow action parameters
+- **Scene Management** - Create, delete, rename, and fire scenes
+- **Automation Envelopes** - Add/clear automation points and read clip envelopes
+- **VST Plugin Support** - Control third-party plugins [partially achievable via the "Configure" parameter function]
 - **Arrangement View** - Full timeline control
 - **Hardware Integration** - Bridge MIDI controllers through AI
-- **Advanced AI** - Smarter and better music understanding and generation
 
 ---
 
@@ -270,6 +278,8 @@ This project is licensed under the MIT License - see [LICENSE](LICENSE) for deta
 - [Model Context Protocol](https://github.com/modelcontextprotocol) - AI integration framework
 - [ElevenLabs API](https://elevenlabs.io) - Professional voice generation
 - [Ableton Live](https://www.ableton.com) - Digital audio workstation
+
+**Forked from:** [ableton-mcp-extended](https://github.com/uisato/ableton-mcp-extended) by uisato
 
 **Inspired by:** The original [ableton-mcp](https://github.com/ahujasid/ableton-mcp) project
 

@@ -226,6 +226,11 @@ class AbletonMCP(ControlSurface):
             elif command_type == "get_track_info":
                 track_index = params.get("track_index", 0)
                 response["result"] = self._get_track_info(track_index)
+            elif command_type == "get_track_summary":
+                track_index = params.get("track_index", 0)
+                response["result"] = self._get_track_summary(track_index)
+            elif command_type == "list_tracks_summary":
+                response["result"] = self._list_tracks_summary()
             elif command_type == "get_track_routing":
                 track_index = params.get("track_index", 0)
                 response["result"] = self._get_track_routing(track_index)
@@ -736,21 +741,12 @@ class AbletonMCP(ControlSurface):
                     "type": self._get_device_type(device)
                 })
             
-            result = {
-                "index": track_index,
-                "name": track.name,
-                "is_audio_track": track.has_audio_input,
-                "is_midi_track": track.has_midi_input,
-                "mute": track.mute,
-                "solo": track.solo,
-                "arm": track.arm,
-                "volume": track.mixer_device.volume.value,
-                "panning": track.mixer_device.panning.value,
+            result = self._track_common_payload(track_index, track)
+            result.update({
                 "routing": self._routing_info_for_track(track),
-                "playback_state": self._get_track_playback_state(track),
                 "clip_slots": clip_slots,
                 "devices": devices
-            }
+            })
             return result
         except Exception as e:
             self.log_message("Error getting track info: " + str(e))
@@ -787,6 +783,61 @@ class AbletonMCP(ControlSurface):
             "display_name": display_name,
             "identifier": identifier,
         }
+
+    def _current_routing_info_for_track(self, track):
+        """Collect only the current routing metadata for a track."""
+        return {
+            "current_output_routing_type": self._serialize_routing_option(
+                getattr(track, "output_routing_type", None)
+            ),
+            "current_output_routing_channel": self._serialize_routing_option(
+                getattr(track, "output_routing_channel", None)
+            ),
+        }
+
+    def _track_common_payload(self, track_index, track):
+        """Serialize stable track metadata shared by full and compact payloads."""
+        return {
+            "index": track_index,
+            "name": track.name,
+            "is_audio_track": track.has_audio_input,
+            "is_midi_track": track.has_midi_input,
+            "mute": track.mute,
+            "solo": track.solo,
+            "arm": track.arm,
+            "volume": track.mixer_device.volume.value,
+            "panning": track.mixer_device.panning.value,
+            "playback_state": self._get_track_playback_state(track),
+        }
+
+    def _get_track_summary(self, track_index):
+        """Get compact information about a track."""
+        try:
+            if track_index < 0 or track_index >= len(self._song.tracks):
+                raise IndexError("Track index out of range")
+
+            track = self._song.tracks[track_index]
+            result = self._track_common_payload(track_index, track)
+            result.update({
+                "device_count": len(track.devices),
+                "clip_slot_count": len(track.clip_slots),
+                "routing": self._current_routing_info_for_track(track),
+            })
+            return result
+        except Exception as e:
+            self.log_message("Error getting track summary: " + str(e))
+            raise
+
+    def _list_tracks_summary(self):
+        """Get compact information for all tracks."""
+        try:
+            return [
+                self._get_track_summary(track_index)
+                for track_index in range(len(self._song.tracks))
+            ]
+        except Exception as e:
+            self.log_message("Error listing track summaries: " + str(e))
+            raise
 
     def _routing_info_for_track(self, track):
         """Collect current and available routing metadata for a track."""
