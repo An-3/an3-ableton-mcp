@@ -77,9 +77,14 @@ C:\Users\[YourUsername]\Documents\Ableton\User Library\Remote Scripts\
 
 1. **Create folder:** In your Remote Scripts directory, create a new folder called `AbletonMCP`
 2. **Copy file:** Copy `AbletonMCP_Remote_Script/__init__.py` into the `AbletonMCP` folder
+3. **Preferred on macOS:** Run the sync helper from the repo root:
+   ```bash
+   ableton-mcp-install-remote-script
+   ```
+   This updates every discovered `Live */User Remote Scripts/AbletonMCP/__init__.py` install so multiple Live versions do not drift out of sync.
 
 **Your folder structure should look like:**
-```
+``` 
 Remote Scripts/
 ├── AbletonMCP/
 │   └── __init__.py
@@ -89,6 +94,7 @@ Remote Scripts/
 Same would apply if you want to install the UDP version of Ableton MCP server. Create another folder (I called it "AbletonMCP_UDP") and place its corresponding '__init__.py' inside. Both servers can co-exist.
 
 > 💡 **Tip:** Double-check this folder structure - it's the most common source of installation issues.
+> 💡 **Update workflow:** After pulling repo changes that touch `AbletonMCP_Remote_Script/__init__.py`, rerun `ableton-mcp-install-remote-script` before reloading the AbletonMCP control surface.
 
 ---
 

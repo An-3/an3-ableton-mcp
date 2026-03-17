@@ -11,6 +11,8 @@ Video demonstration: https://www.youtube.com/watch?v=7ZKPIrJuuKk
 
 This tool is designed for producers, developers, and AI enthusiasts who want to streamline their music production workflow, experiment with generative music, and build custom integrations with Ableton Live.
 
+For the current mastering and export process used with this MCP stack, see [MASTERING_WORKFLOW.md](MASTERING_WORKFLOW.md).
+
 **You can transform this conversation:**
 ```
 👤 "Create a brief minimalist/neo-classical composition in a style similar to Ólafur Arnalds'. (Ableton MCP) / I've loaded four MIDI tracks called "Noire" and "Noire (2) ["Emotional Felt" presets], "Noire (2) ["Reversed Felt" preset, for ambient background], and "Noire (3) ["Ethereal Felt" preset, also for ambient background]. All loaded with nice piano instruments. You have also a MIDI track called "Strings" with a nice string ensemble instrument loaded. Feel free to add new instruments and effects, if pertinent."
