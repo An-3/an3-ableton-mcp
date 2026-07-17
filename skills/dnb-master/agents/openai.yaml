@@ -1,0 +1,4 @@
+interface:
+  display_name: "DnB Master"
+  short_description: "Master DnB, bring vocals forward, and repair AI renders in Ableton"
+  default_prompt: "Use $dnb-master to master a drum and bass track or assess an AI-generated DnB render in Ableton Live, choose a preset, run a vocal revision pass when needed, and decide whether to repair or regenerate."

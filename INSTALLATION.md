@@ -77,9 +77,14 @@ C:\Users\[YourUsername]\Documents\Ableton\User Library\Remote Scripts\
 
 1. **Create folder:** In your Remote Scripts directory, create a new folder called `AbletonMCP`
 2. **Copy file:** Copy `AbletonMCP_Remote_Script/__init__.py` into the `AbletonMCP` folder
+3. **Preferred on macOS:** Run the sync helper from the repo root:
+   ```bash
+   ableton-mcp-install-remote-script
+   ```
+   This updates every discovered `Live */User Remote Scripts/AbletonMCP/__init__.py` install so multiple Live versions do not drift out of sync.
 
 **Your folder structure should look like:**
-```
+``` 
 Remote Scripts/
 ├── AbletonMCP/
 │   └── __init__.py
@@ -89,6 +94,7 @@ Remote Scripts/
 Same would apply if you want to install the UDP version of Ableton MCP server. Create another folder (I called it "AbletonMCP_UDP") and place its corresponding '__init__.py' inside. Both servers can co-exist.
 
 > 💡 **Tip:** Double-check this folder structure - it's the most common source of installation issues.
+> 💡 **Update workflow:** After pulling repo changes that touch `AbletonMCP_Remote_Script/__init__.py`, rerun `ableton-mcp-install-remote-script` before reloading the AbletonMCP control surface.
 
 ---
 
@@ -124,14 +130,18 @@ Choose your preferred AI assistant:
     "AbletonMCP": {
       "command": "python",
       "args": [
-        "C:\\path\\to\\ableton-mcp-extended\\MCP_Server\\server.py"
-      ]
+        "C:\\path\\to\\an3-ableton-mcp\\MCP_Server\\server.py"
+      ],
+      "env": {
+        "ABLETON_MCP_TOOL_PROFILE": "all",
+        "ABLETON_MCP_RESPONSE_PROFILE": "compat"
+      }
     }
   }
 }
 ```
 
-5. **Update the path:** Replace `C:\\path\\to\\ableton-mcp-extended` with your actual installation path
+5. **Update the path:** Replace `C:\\path\\to\\an3-ableton-mcp` with your actual installation path
 6. **Save** and **restart Claude Desktop**
 
 #### 🔍 Finding Your Installation Path
@@ -160,8 +170,12 @@ echo $PWD/MCP_Server/server.py
     "AbletonMCP": {
       "command": "python",
       "args": [
-        "C:/path/to/ableton-mcp-extended/MCP_Server/server.py"
-      ]
+        "C:/path/to/an3-ableton-mcp/MCP_Server/server.py"
+      ],
+      "env": {
+        "ABLETON_MCP_TOOL_PROFILE": "all",
+        "ABLETON_MCP_RESPONSE_PROFILE": "compat"
+      }
     }
   }
 }
@@ -169,13 +183,19 @@ echo $PWD/MCP_Server/server.py
 
 4. **Save settings**
 
+### Profile Options
+
+- `ABLETON_MCP_TOOL_PROFILE=all` keeps the full 40-tool surface. `ABLETON_MCP_TOOL_PROFILE=core` exposes only `get_session_info`, `list_tracks`, `get_track_info`, `create_midi_track`, `create_audio_track`, `set_track_name`, `create_clip`, `add_notes_to_clip`, `set_tempo`, `load_instrument_or_effect`, `load_audio_clip`, `fire_clip`, `start_playback`, and `stop_playback`.
+- `ABLETON_MCP_RESPONSE_PROFILE=compat` keeps the existing response shapes. `ABLETON_MCP_RESPONSE_PROFILE=compact` trims the token-heavy read tools and mutation receipts.
+- Use `all + compat` for maximum compatibility. Use `core + compact` for the lowest token usage.
+
 ### Verify AI Connection
 
 **For Claude Desktop:**
 Look for a **🔨 hammer icon** in the chat interface - this indicates MCP tools are loaded.
 
 **For Cursor:**
-You'll see a green dot next to the MCP server icon, and a message saying "40 tools enabled".
+You'll see a green dot next to the MCP server icon, and a message showing either 40 tools (`all`) or 14 tools (`core`).
 
 You might have to restart your AI assistant in order for changes to impact.
 

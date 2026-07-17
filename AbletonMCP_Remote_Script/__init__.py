@@ -18,6 +18,23 @@ except ImportError:
 # Constants for socket communication
 DEFAULT_PORT = 9877
 HOST = "localhost"
+REMOTE_SCRIPT_NAME = "AbletonMCP"
+REMOTE_SCRIPT_VERSION = "2026.03.16.1"
+REMOTE_SCRIPT_PROTOCOL_VERSION = 3
+REMOTE_SCRIPT_CAPABILITIES = [
+    "get_remote_script_info",
+    "get_arrangement_summary",
+    "get_track_devices",
+    "track_scope_master",
+    "track_scope_return",
+    "get_track_meter",
+    "get_track_input_routing",
+    "set_track_input_routing",
+    "get_track_monitor_state",
+    "set_track_monitor_state",
+    "find_device_by_name",
+    "delete_device",
+]
 
 def create_instance(c_instance):
     """Create and return the AbletonMCP script instance"""
@@ -221,20 +238,63 @@ class AbletonMCP(ControlSurface):
         
         try:
             # Route the command to the appropriate handler
-            if command_type == "get_session_info":
+            if command_type == "get_remote_script_info":
+                response["result"] = self._get_remote_script_info()
+            elif command_type == "get_session_info":
                 response["result"] = self._get_session_info()
             elif command_type == "get_track_info":
                 track_index = params.get("track_index", 0)
-                response["result"] = self._get_track_info(track_index)
+                track_scope = params.get("track_scope", "track")
+                response["result"] = self._get_track_info(track_index, track_scope)
+            elif command_type == "get_track_devices":
+                track_index = params.get("track_index", 0)
+                track_scope = params.get("track_scope", "track")
+                response["result"] = self._get_track_devices(track_index, track_scope)
+            elif command_type == "get_track_summary":
+                track_index = params.get("track_index", 0)
+                response["result"] = self._get_track_summary(track_index)
+            elif command_type == "list_tracks_summary":
+                response["result"] = self._list_tracks_summary()
+            elif command_type == "get_track_routing":
+                track_index = params.get("track_index", 0)
+                track_scope = params.get("track_scope", "track")
+                response["result"] = self._get_track_routing(track_index, track_scope)
+            elif command_type == "get_track_input_routing":
+                track_index = params.get("track_index", 0)
+                response["result"] = self._get_track_input_routing(track_index)
+            elif command_type == "get_track_monitor_state":
+                track_index = params.get("track_index", 0)
+                response["result"] = self._get_track_monitor_state(track_index)
             elif command_type == "get_master_meter":
                 response["result"] = self._get_master_meter()
+            elif command_type == "get_track_meter":
+                track_index = params.get("track_index", 0)
+                track_scope = params.get("track_scope", "track")
+                response["result"] = self._get_track_meter(track_index, track_scope)
+            elif command_type == "get_transport_state":
+                response["result"] = self._get_transport_state()
+            elif command_type == "list_playing_clips":
+                response["result"] = self._list_playing_clips()
+            elif command_type == "find_device_by_name":
+                track_index = params.get("track_index", 0)
+                track_scope = params.get("track_scope", "track")
+                name = params.get("name", "")
+                exact = params.get("exact", True)
+                response["result"] = self._find_device_by_name(track_index, name, track_scope, exact)
+            elif command_type == "get_arrangement_summary":
+                detail_level = params.get("detail_level", "basic")
+                response["result"] = self._get_arrangement_summary(detail_level)
             # Commands that modify Live's state should be scheduled on the main thread
             elif command_type in ["create_midi_track", "set_track_name",
                                  "set_track_volume", "set_track_panning",
                                  "get_device_parameters", "set_device_parameter",
                                  "create_clip", "add_notes_to_clip", "set_clip_name",
                                  "set_tempo", "fire_clip", "stop_clip",
-                                 "start_playback", "stop_playback", "load_browser_item"]:
+                                 "start_playback", "stop_playback",
+                                 "load_instrument_or_effect", "load_browser_item",
+                                 "set_track_output_routing", "set_track_input_routing",
+                                 "set_track_monitor_state", "delete_device", "stop_all_clips",
+                                 "back_to_arrangement"]:
                 # Use a thread-safe approach with a response queue
                 response_queue = queue.Queue()
                 
@@ -260,13 +320,15 @@ class AbletonMCP(ControlSurface):
                         elif command_type == "get_device_parameters":
                             track_index = params.get("track_index", 0)
                             device_index = params.get("device_index", 0)
-                            result = self._get_device_parameters(track_index, device_index)
+                            track_scope = params.get("track_scope", "track")
+                            result = self._get_device_parameters(track_index, device_index, track_scope)
                         elif command_type == "set_device_parameter":
                             track_index = params.get("track_index", 0)
                             device_index = params.get("device_index", 0)
                             parameter_index = params.get("parameter_index", 0)
                             value = params.get("value", 0.0)
-                            result = self._set_device_parameter(track_index, device_index, parameter_index, value)
+                            track_scope = params.get("track_scope", "track")
+                            result = self._set_device_parameter(track_index, device_index, parameter_index, value, track_scope)
                         elif command_type == "create_clip":
                             track_index = params.get("track_index", 0)
                             clip_index = params.get("clip_index", 0)
@@ -297,14 +359,48 @@ class AbletonMCP(ControlSurface):
                             result = self._start_playback()
                         elif command_type == "stop_playback":
                             result = self._stop_playback()
+                        elif command_type == "stop_all_clips":
+                            result = self._stop_all_clips()
+                        elif command_type == "back_to_arrangement":
+                            result = self._back_to_arrangement()
                         elif command_type == "load_instrument_or_effect":
                             track_index = params.get("track_index", 0)
                             uri = params.get("uri", "")
-                            result = self._load_instrument_or_effect(track_index, uri)
+                            track_scope = params.get("track_scope", "track")
+                            result = self._load_instrument_or_effect(track_index, uri, track_scope)
                         elif command_type == "load_browser_item":
                             track_index = params.get("track_index", 0)
                             item_uri = params.get("item_uri", "")
-                            result = self._load_browser_item(track_index, item_uri)
+                            track_scope = params.get("track_scope", "track")
+                            result = self._load_browser_item(track_index, item_uri, track_scope)
+                        elif command_type == "set_track_output_routing":
+                            track_index = params.get("track_index", 0)
+                            routing_type_name = params.get("routing_type_name", "")
+                            routing_channel_name = params.get("routing_channel_name", None)
+                            result = self._set_track_output_routing(
+                                track_index,
+                                routing_type_name,
+                                routing_channel_name
+                            )
+                        elif command_type == "set_track_input_routing":
+                            track_index = params.get("track_index", 0)
+                            routing_type_name = params.get("routing_type_name", "")
+                            routing_channel_name = params.get("routing_channel_name", None)
+                            result = self._set_track_input_routing(
+                                track_index,
+                                routing_type_name,
+                                routing_channel_name
+                            )
+                        elif command_type == "set_track_monitor_state":
+                            track_index = params.get("track_index", 0)
+                            state_name = params.get("state_name", None)
+                            state_value = params.get("state_value", None)
+                            result = self._set_track_monitor_state(track_index, state_name, state_value)
+                        elif command_type == "delete_device":
+                            track_index = params.get("track_index", 0)
+                            device_index = params.get("device_index", 0)
+                            track_scope = params.get("track_scope", "track")
+                            result = self._delete_device(track_index, device_index, track_scope)
                         
                         # Put the result in the queue
                         response_queue.put({"status": "success", "result": result})
@@ -397,7 +493,15 @@ class AbletonMCP(ControlSurface):
         return response
     
     # Command implementations
-    
+
+    def _get_remote_script_info(self):
+        return {
+            "script_name": REMOTE_SCRIPT_NAME,
+            "script_version": REMOTE_SCRIPT_VERSION,
+            "protocol_version": REMOTE_SCRIPT_PROTOCOL_VERSION,
+            "capabilities": list(REMOTE_SCRIPT_CAPABILITIES),
+        }
+
     def _get_session_info(self):
         """Get information about the current session"""
         try:
@@ -407,6 +511,8 @@ class AbletonMCP(ControlSurface):
                 "signature_denominator": self._song.signature_denominator,
                 "track_count": len(self._song.tracks),
                 "return_track_count": len(self._song.return_tracks),
+                "song_length": self._safe_float(getattr(self._song, "song_length", None)),
+                "file_path": getattr(self._song, "file_path", None),
                 "master_track": {
                     "name": "Master",
                     "volume": self._song.master_track.mixer_device.volume.value,
@@ -425,6 +531,36 @@ class AbletonMCP(ControlSurface):
         except (TypeError, ValueError):
             return None
 
+    def _safe_int(self, value):
+        """Convert a value to int, returning None when unavailable."""
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _safe_getattr(self, target, attr_name, default=None):
+        """Return an attribute while tolerating Live API property errors."""
+        try:
+            return getattr(target, attr_name)
+        except Exception:
+            return default
+
+    def _safe_bool_attr(self, target, attr_name, default=None):
+        """Return a boolean-ish attribute or None when unsupported."""
+        value = self._safe_getattr(target, attr_name, default)
+        if value is None:
+            return None
+        try:
+            return bool(value)
+        except Exception:
+            return default
+
+    def _safe_mixer_value(self, track, attr_name):
+        """Return a mixer parameter's value when accessible."""
+        mixer_device = self._safe_getattr(track, "mixer_device", None)
+        parameter = self._safe_getattr(mixer_device, attr_name, None)
+        return self._safe_float(self._safe_getattr(parameter, "value", None))
+
     def _linear_to_db(self, value):
         """Convert a linear meter value to dBFS."""
         linear = self._safe_float(value)
@@ -434,43 +570,444 @@ class AbletonMCP(ControlSurface):
             return -120.0
         return 20.0 * math.log10(linear)
 
+    def _normalize_track_scope(self, track_scope):
+        """Normalize a track scope name."""
+        normalized = str(track_scope or "track").strip().lower().replace("_", "-")
+        aliases = {
+            "track": "track",
+            "tracks": "track",
+            "return": "return",
+            "returns": "return",
+            "return-track": "return",
+            "master": "master",
+            "master-track": "master",
+        }
+        if normalized not in aliases:
+            raise ValueError("Unknown track scope '{0}'".format(track_scope))
+        return aliases[normalized]
+
+    def _resolve_track_reference(self, track_index, track_scope="track"):
+        """Resolve a regular, return, or master track reference."""
+        scope = self._normalize_track_scope(track_scope)
+        if scope == "master":
+            index = self._safe_int(track_index)
+            if index not in (None, 0):
+                raise IndexError("Master track index must be 0")
+            return {
+                "track_scope": "master",
+                "index": 0,
+                "track": self._song.master_track,
+            }
+
+        collection = self._song.tracks if scope == "track" else self._song.return_tracks
+        index = self._safe_int(track_index)
+        if index is None or index < 0 or index >= len(collection):
+            raise IndexError("{0} track index out of range".format(scope.title()))
+        return {
+            "track_scope": scope,
+            "index": index,
+            "track": collection[index],
+        }
+
+    def _track_scope_payload(self, track_scope, track_index):
+        return {
+            "track_scope": track_scope,
+            "index": track_index,
+        }
+
+    def _track_clip_slots(self, track):
+        """Return clip slots for a track-like object."""
+        try:
+            return list(getattr(track, "clip_slots", []) or [])
+        except Exception:
+            return []
+
+    def _track_devices(self, track):
+        """Return devices for a track-like object."""
+        try:
+            return list(getattr(track, "devices", []) or [])
+        except Exception:
+            return []
+
+    def _parameter_display_value(self, param):
+        """Best-effort display string for a device parameter."""
+        formatter = getattr(param, "str_for_value", None)
+        if callable(formatter):
+            try:
+                return formatter(param.value)
+            except Exception:
+                pass
+        try:
+            return str(param)
+        except Exception:
+            return None
+
+    def _parameter_value_items(self, param):
+        """Best-effort enum labels for a quantized parameter."""
+        try:
+            value_items = list(getattr(param, "value_items", []) or [])
+        except Exception:
+            return None
+        if not value_items:
+            return None
+        try:
+            return [str(item) for item in value_items]
+        except Exception:
+            return None
+
+    def _monitoring_state_map(self, track=None):
+        """Best-effort mapping of monitoring state names to values."""
+        fallback = {"in": 0, "auto": 1, "off": 2}
+        enum_source = getattr(track, "monitoring_states", None) if track is not None else None
+        if enum_source is None:
+            return fallback
+
+        mapping = {}
+        for label, candidates in (
+            ("in", ("IN", "In", "in")),
+            ("auto", ("AUTO", "Auto", "auto")),
+            ("off", ("OFF", "Off", "off")),
+        ):
+            for attr_name in candidates:
+                if hasattr(enum_source, attr_name):
+                    try:
+                        mapping[label] = int(getattr(enum_source, attr_name))
+                        break
+                    except Exception:
+                        continue
+        if len(mapping) != 3:
+            for key, value in fallback.items():
+                mapping.setdefault(key, value)
+        return mapping
+
+    def _monitoring_state_name(self, track, state_value):
+        """Resolve a monitoring state value back to a stable name."""
+        if state_value is None:
+            return None
+        wanted = self._safe_int(state_value)
+        if wanted is None:
+            return None
+        mapping = self._monitoring_state_map(track)
+        for name, value in mapping.items():
+            if value == wanted:
+                return name
+        return None
+
+    def _coerce_monitoring_state_value(self, track, state_name=None, state_value=None):
+        """Resolve a monitoring state from a name or value."""
+        numeric = self._safe_int(state_value)
+        if numeric is not None:
+            return numeric
+
+        normalized = str(state_name or "").strip().lower().replace("_", "-")
+        aliases = {
+            "in": "in",
+            "input": "in",
+            "on": "in",
+            "auto": "auto",
+            "automatic": "auto",
+            "off": "off",
+        }
+        if normalized not in aliases:
+            raise ValueError("Unknown monitoring state '{0}'".format(state_name))
+        return self._monitoring_state_map(track)[aliases[normalized]]
+
+    def _meter_payload_for_track(self, track_index, track, track_scope):
+        """Serialize meter values for any track scope."""
+        left = self._safe_float(getattr(track, "output_meter_left", None))
+        right = self._safe_float(getattr(track, "output_meter_right", None))
+        level = self._safe_float(getattr(track, "output_meter_level", None))
+        numeric_values = [value for value in (left, right, level) if value is not None]
+        peak = max(numeric_values) if numeric_values else 0.0
+        return {
+            "track_scope": track_scope,
+            "index": track_index,
+            "name": getattr(track, "name", ""),
+            "left_linear": left,
+            "right_linear": right,
+            "level_linear": level,
+            "peak_linear": peak,
+            "left_db": self._linear_to_db(left),
+            "right_db": self._linear_to_db(right),
+            "level_db": self._linear_to_db(level),
+            "peak_db": self._linear_to_db(peak),
+            "is_clipping": peak >= 1.0,
+            "clip_threshold_linear": 1.0,
+        }
+
+    def _collect_arrangement_clip_summary(self, track_index, track, include_clips=False):
+        """Collect a lightweight arrangement summary for a regular track."""
+        clip_entries = []
+        first_start = None
+        last_end = None
+        try:
+            arrangement_clips = list(getattr(track, "arrangement_clips", []) or [])
+        except Exception:
+            arrangement_clips = []
+
+        for clip_index, clip in enumerate(arrangement_clips):
+            start_time = self._safe_float(getattr(clip, "start_time", None))
+            length = self._safe_float(getattr(clip, "length", None))
+            end_time = None
+            if start_time is not None and length is not None:
+                end_time = start_time + length
+                if first_start is None or start_time < first_start:
+                    first_start = start_time
+                if last_end is None or end_time > last_end:
+                    last_end = end_time
+            if include_clips:
+                clip_entries.append({
+                    "index": clip_index,
+                    "name": self._safe_getattr(clip, "name", ""),
+                    "start_time": start_time,
+                    "length": length,
+                    "end_time": end_time,
+                })
+
+        result = {
+            "index": track_index,
+            "name": self._safe_getattr(track, "name", ""),
+            "arrangement_clip_count": len(arrangement_clips),
+            "first_clip_start_time": first_start,
+            "last_clip_end_time": last_end,
+        }
+        if include_clips:
+            result["clips"] = clip_entries
+        return result
+
+    def _get_back_to_arrangement_binding(self):
+        """Find a Live API binding that can expose or trigger Back to Arrangement."""
+        candidates = [("song", self._song)]
+        try:
+            song_view = getattr(self._song, "view", None)
+        except Exception:
+            song_view = None
+        if song_view is not None:
+            candidates.append(("song.view", song_view))
+        try:
+            app = self.application()
+        except Exception:
+            app = None
+        if app is not None:
+            app_view = getattr(app, "view", None)
+            if app_view is not None:
+                candidates.append(("application.view", app_view))
+
+        for source, target in candidates:
+            if target is None:
+                continue
+            try:
+                attr = getattr(target, "back_to_arranger")
+            except Exception:
+                continue
+            return {
+                "source": source + ".back_to_arranger",
+                "target": target,
+                "attribute": attr,
+            }
+        return None
+
+    def _get_back_to_arrangement_state(self):
+        """Return whether Session currently overrides the Arrangement, when observable."""
+        binding = self._get_back_to_arrangement_binding()
+        if binding is None:
+            return {
+                "known": False,
+                "session_override_active": None,
+                "source": None,
+            }
+
+        attribute = binding["attribute"]
+        if callable(attribute):
+            return {
+                "known": False,
+                "session_override_active": None,
+                "source": binding["source"],
+            }
+
+        try:
+            value = bool(attribute)
+        except Exception:
+            return {
+                "known": False,
+                "session_override_active": None,
+                "source": binding["source"],
+            }
+
+        return {
+            "known": True,
+            "session_override_active": value,
+            "source": binding["source"],
+        }
+
+    def _get_track_playback_state(self, track):
+        """Collect per-track Session playback state."""
+        playing_slot_index = self._safe_int(self._safe_getattr(track, "playing_slot_index", None))
+        fired_slot_index = self._safe_int(self._safe_getattr(track, "fired_slot_index", None))
+        return {
+            "playing_slot_index": playing_slot_index,
+            "fired_slot_index": fired_slot_index,
+            "has_playing_session_clip": playing_slot_index is not None and playing_slot_index >= 0,
+            "has_fired_session_clip": fired_slot_index is not None and fired_slot_index >= 0,
+            "arrangement_playing": playing_slot_index == -2,
+            "track_stopped": playing_slot_index == -1,
+        }
+
+    def _clip_state_payload(self, track_index, track, slot_index, state):
+        """Serialize a playing or fired Session clip."""
+        clip_name = ""
+        has_clip = False
+        clip_slot_count = len(track.clip_slots)
+        if 0 <= slot_index < clip_slot_count:
+            clip_slot = track.clip_slots[slot_index]
+            has_clip = bool(clip_slot.has_clip)
+            if has_clip and clip_slot.clip:
+                clip_name = clip_slot.clip.name
+        return {
+            "track_index": track_index,
+            "track_name": track.name,
+            "slot_index": slot_index,
+            "clip_name": clip_name,
+            "has_clip": has_clip,
+            "state": state,
+        }
+
+    def _collect_playing_clips(self):
+        """Collect currently active Session clips across all tracks."""
+        playing_clips = []
+        for track_index, track in enumerate(self._song.tracks):
+            playback_state = self._get_track_playback_state(track)
+            seen_slots = set()
+
+            playing_slot_index = playback_state["playing_slot_index"]
+            if playing_slot_index is not None and playing_slot_index >= 0:
+                playing_clips.append(
+                    self._clip_state_payload(track_index, track, playing_slot_index, "playing")
+                )
+                seen_slots.add(playing_slot_index)
+
+            fired_slot_index = playback_state["fired_slot_index"]
+            if fired_slot_index is not None and fired_slot_index >= 0 and fired_slot_index not in seen_slots:
+                playing_clips.append(
+                    self._clip_state_payload(track_index, track, fired_slot_index, "fired")
+                )
+                seen_slots.add(fired_slot_index)
+
+            if not seen_slots:
+                for slot_index, clip_slot in enumerate(track.clip_slots):
+                    if not clip_slot.has_clip or not clip_slot.clip:
+                        continue
+                    if clip_slot.clip.is_playing:
+                        playing_clips.append(
+                            self._clip_state_payload(track_index, track, slot_index, "playing")
+                        )
+                        seen_slots.add(slot_index)
+
+        return playing_clips
+
+    def _get_transport_state(self):
+        """Get transport state and Arrangement export safety metadata."""
+        try:
+            playing_clips = self._collect_playing_clips()
+            back_state = self._get_back_to_arrangement_state()
+            if back_state["known"]:
+                session_override_active = back_state["session_override_active"]
+                detection_method = "direct"
+            elif playing_clips:
+                session_override_active = True
+                detection_method = "inferred_from_active_session_clips"
+            else:
+                session_override_active = None
+                detection_method = "unknown"
+
+            return {
+                "is_playing": bool(self._song.is_playing),
+                "current_song_time": self._safe_float(getattr(self._song, "current_song_time", None)),
+                "playing_clip_count": len(playing_clips),
+                "playing_clips": playing_clips,
+                "arrangement_state_known": back_state["known"],
+                "session_override_active": session_override_active,
+                "session_override_detection": detection_method,
+                "back_to_arrangement_source": back_state["source"],
+                "arrangement_export_ready": bool(
+                    back_state["known"] and not back_state["session_override_active"] and not playing_clips
+                ),
+            }
+        except Exception as e:
+            self.log_message("Error getting transport state: " + str(e))
+            raise
+
+    def _list_playing_clips(self):
+        """List the currently active Session clips."""
+        try:
+            playing_clips = self._collect_playing_clips()
+            transport_state = self._get_transport_state()
+            return {
+                "playing_clips": playing_clips,
+                "count": len(playing_clips),
+                "session_override_active": transport_state.get("session_override_active"),
+                "arrangement_state_known": transport_state.get("arrangement_state_known"),
+            }
+        except Exception as e:
+            self.log_message("Error listing playing clips: " + str(e))
+            raise
+
+    def _invoke_back_to_arrangement(self):
+        """Attempt to trigger Back to Arrangement directly through the Live API."""
+        binding = self._get_back_to_arrangement_binding()
+        if binding is None:
+            return None
+
+        attribute = binding["attribute"]
+        if callable(attribute):
+            attribute()
+            return {
+                "method": binding["source"],
+                "action": "called",
+            }
+
+        try:
+            setattr(binding["target"], "back_to_arranger", 0)
+            return {
+                "method": binding["source"],
+                "action": "set_int_zero",
+            }
+        except Exception:
+            pass
+
+        try:
+            setattr(binding["target"], "back_to_arranger", False)
+            return {
+                "method": binding["source"],
+                "action": "set_false",
+            }
+        except Exception:
+            return None
+
     def _get_master_meter(self):
         """Get current master meter values and clipping state."""
         try:
             master = self._song.master_track
-            left = self._safe_float(getattr(master, "output_meter_left", None))
-            right = self._safe_float(getattr(master, "output_meter_right", None))
-            level = self._safe_float(getattr(master, "output_meter_level", None))
-            numeric_values = [v for v in [left, right, level] if v is not None]
-            peak = max(numeric_values) if numeric_values else 0.0
-
-            return {
-                "left_linear": left,
-                "right_linear": right,
-                "level_linear": level,
-                "peak_linear": peak,
-                "left_db": self._linear_to_db(left),
-                "right_db": self._linear_to_db(right),
-                "level_db": self._linear_to_db(level),
-                "peak_db": self._linear_to_db(peak),
-                "is_clipping": peak >= 1.0,
-                "clip_threshold_linear": 1.0
-            }
+            result = self._meter_payload_for_track(0, master, "master")
+            del result["track_scope"]
+            del result["index"]
+            del result["name"]
+            return result
         except Exception as e:
             self.log_message("Error getting master meter: " + str(e))
             raise
-    
-    def _get_track_info(self, track_index):
+
+    def _get_track_info(self, track_index, track_scope="track"):
         """Get information about a track"""
         try:
-            if track_index < 0 or track_index >= len(self._song.tracks):
-                raise IndexError("Track index out of range")
-            
-            track = self._song.tracks[track_index]
-            
+            resolved = self._resolve_track_reference(track_index, track_scope)
+            track = resolved["track"]
+            resolved_index = resolved["index"]
+            resolved_scope = resolved["track_scope"]
+
             # Get clip slots
             clip_slots = []
-            for slot_index, slot in enumerate(track.clip_slots):
+            for slot_index, slot in enumerate(self._track_clip_slots(track)):
                 clip_info = None
                 if slot.has_clip:
                     clip = slot.clip
@@ -488,31 +1025,365 @@ class AbletonMCP(ControlSurface):
                 })
             
             # Get devices
-            devices = []
-            for device_index, device in enumerate(track.devices):
-                devices.append({
-                    "index": device_index,
-                    "name": device.name,
-                    "class_name": device.class_name,
-                    "type": self._get_device_type(device)
-                })
+            devices = self._device_payloads_for_track(track)
             
-            result = {
-                "index": track_index,
-                "name": track.name,
-                "is_audio_track": track.has_audio_input,
-                "is_midi_track": track.has_midi_input,
-                "mute": track.mute,
-                "solo": track.solo,
-                "arm": track.arm,
-                "volume": track.mixer_device.volume.value,
-                "panning": track.mixer_device.panning.value,
+            result = self._track_common_payload(resolved_index, track, resolved_scope)
+            result.update({
+                "routing": self._routing_info_for_track(track),
                 "clip_slots": clip_slots,
                 "devices": devices
-            }
+            })
             return result
         except Exception as e:
             self.log_message("Error getting track info: " + str(e))
+            raise
+
+    def _serialize_routing_option(self, option):
+        """Normalize a Live routing object/dict into JSON-safe data."""
+        if option is None:
+            return None
+        if isinstance(option, dict):
+            return {
+                "display_name": option.get("display_name", ""),
+                "identifier": option.get("identifier", ""),
+            }
+
+        display_name = ""
+        identifier = ""
+        try:
+            display_name = getattr(option, "display_name", "") or getattr(option, "name", "")
+        except Exception:
+            display_name = ""
+        try:
+            identifier = getattr(option, "identifier", "")
+        except Exception:
+            identifier = ""
+
+        if not display_name and not identifier:
+            try:
+                display_name = unicode(option)
+            except NameError:
+                display_name = str(option)
+
+        return {
+            "display_name": display_name,
+            "identifier": identifier,
+        }
+
+    def _current_routing_info_for_track(self, track):
+        """Collect only the current routing metadata for a track."""
+        return {
+            "current_input_routing_type": self._serialize_routing_option(
+                getattr(track, "input_routing_type", None)
+            ),
+            "current_input_routing_channel": self._serialize_routing_option(
+                getattr(track, "input_routing_channel", None)
+            ),
+            "current_output_routing_type": self._serialize_routing_option(
+                getattr(track, "output_routing_type", None)
+            ),
+            "current_output_routing_channel": self._serialize_routing_option(
+                getattr(track, "output_routing_channel", None)
+            ),
+        }
+
+    def _track_common_payload(self, track_index, track, track_scope="track"):
+        """Serialize stable track metadata shared by full and compact payloads."""
+        return {
+            "track_scope": track_scope,
+            "index": self._safe_int(track_index),
+            "name": self._safe_getattr(track, "name", ""),
+            "is_audio_track": self._safe_bool_attr(track, "has_audio_input", None),
+            "is_midi_track": self._safe_bool_attr(track, "has_midi_input", None),
+            "mute": self._safe_bool_attr(track, "mute", None),
+            "solo": self._safe_bool_attr(track, "solo", None),
+            "arm": self._safe_bool_attr(track, "arm", None),
+            "volume": self._safe_mixer_value(track, "volume"),
+            "panning": self._safe_mixer_value(track, "panning"),
+            "playback_state": self._get_track_playback_state(track),
+        }
+
+    def _device_summary_payload(self, device_index, device):
+        """Serialize lightweight device metadata."""
+        return {
+            "index": device_index,
+            "name": self._safe_getattr(device, "name", ""),
+            "class_name": self._safe_getattr(device, "class_name", ""),
+            "type": self._get_device_type(device),
+        }
+
+    def _device_payloads_for_track(self, track):
+        """Serialize all devices on a track-like object."""
+        devices = []
+        for device_index, device in enumerate(self._track_devices(track)):
+            devices.append(self._device_summary_payload(device_index, device))
+        return devices
+
+    def _get_track_devices(self, track_index, track_scope="track"):
+        """Get lightweight device metadata for a track, return, or master bus."""
+        try:
+            resolved = self._resolve_track_reference(track_index, track_scope)
+            track = resolved["track"]
+            return {
+                "track_scope": resolved["track_scope"],
+                "index": resolved["index"],
+                "name": self._safe_getattr(track, "name", ""),
+                "devices": self._device_payloads_for_track(track),
+            }
+        except Exception as e:
+            self.log_message("Error getting track devices: " + str(e))
+            raise
+
+    def _get_track_summary(self, track_index):
+        """Get compact information about a track."""
+        try:
+            if track_index < 0 or track_index >= len(self._song.tracks):
+                raise IndexError("Track index out of range")
+
+            track = self._song.tracks[track_index]
+            result = self._track_common_payload(track_index, track, "track")
+            result.update({
+                "device_count": len(self._track_devices(track)),
+                "clip_slot_count": len(self._track_clip_slots(track)),
+                "routing": self._current_routing_info_for_track(track),
+            })
+            return result
+        except Exception as e:
+            self.log_message("Error getting track summary: " + str(e))
+            raise
+
+    def _list_tracks_summary(self):
+        """Get compact information for all tracks."""
+        try:
+            return [
+                self._get_track_summary(track_index)
+                for track_index in range(len(self._song.tracks))
+            ]
+        except Exception as e:
+            self.log_message("Error listing track summaries: " + str(e))
+            raise
+
+    def _routing_info_for_track(self, track):
+        """Collect current and available routing metadata for a track."""
+        def get_options(attr_name):
+            try:
+                options = getattr(track, attr_name, [])
+                return [self._serialize_routing_option(option) for option in list(options)]
+            except Exception:
+                return []
+
+        def get_current(attr_name):
+            try:
+                return self._serialize_routing_option(getattr(track, attr_name, None))
+            except Exception:
+                return None
+
+        return {
+            "current_input_routing_type": get_current("input_routing_type"),
+            "current_input_routing_channel": get_current("input_routing_channel"),
+            "available_input_routing_types": get_options("available_input_routing_types"),
+            "available_input_routing_channels": get_options("available_input_routing_channels"),
+            "current_output_routing_type": get_current("output_routing_type"),
+            "current_output_routing_channel": get_current("output_routing_channel"),
+            "available_output_routing_types": get_options("available_output_routing_types"),
+            "available_output_routing_channels": get_options("available_output_routing_channels"),
+        }
+
+    def _get_track_routing(self, track_index, track_scope="track"):
+        """Get routing information for a track."""
+        try:
+            resolved = self._resolve_track_reference(track_index, track_scope)
+            track = resolved["track"]
+            return {
+                "track_scope": resolved["track_scope"],
+                "index": resolved["index"],
+                "name": track.name,
+                "routing": self._routing_info_for_track(track)
+            }
+        except Exception as e:
+            self.log_message("Error getting track routing: " + str(e))
+            raise
+
+    def _get_track_input_routing(self, track_index):
+        """Get input routing information for a regular track."""
+        try:
+            resolved = self._resolve_track_reference(track_index, "track")
+            track = resolved["track"]
+            return {
+                "track_scope": "track",
+                "index": resolved["index"],
+                "name": track.name,
+                "routing": {
+                    "current_input_routing_type": self._serialize_routing_option(
+                        getattr(track, "input_routing_type", None)
+                    ),
+                    "current_input_routing_channel": self._serialize_routing_option(
+                        getattr(track, "input_routing_channel", None)
+                    ),
+                    "available_input_routing_types": [
+                        self._serialize_routing_option(option)
+                        for option in list(getattr(track, "available_input_routing_types", []) or [])
+                    ],
+                    "available_input_routing_channels": [
+                        self._serialize_routing_option(option)
+                        for option in list(getattr(track, "available_input_routing_channels", []) or [])
+                    ],
+                },
+            }
+        except Exception as e:
+            self.log_message("Error getting track input routing: " + str(e))
+            raise
+
+    def _match_routing_option(self, options, name):
+        """Find a routing option by display name or identifier."""
+        if not name:
+            return None
+        wanted = name.strip().lower()
+        for option in list(options):
+            serialized = self._serialize_routing_option(option)
+            display_name = (serialized.get("display_name", "") or "").strip().lower()
+            identifier = (serialized.get("identifier", "") or "").strip().lower()
+            if wanted == display_name or wanted == identifier:
+                return option
+        return None
+
+    def _set_track_output_routing(self, track_index, routing_type_name, routing_channel_name=None):
+        """Set a track's output routing type and optional channel."""
+        try:
+            if track_index < 0 or track_index >= len(self._song.tracks):
+                raise IndexError("Track index out of range")
+
+            track = self._song.tracks[track_index]
+
+            available_types = getattr(track, "available_output_routing_types", [])
+            routing_type = self._match_routing_option(available_types, routing_type_name)
+            if routing_type is None:
+                available_names = [
+                    self._serialize_routing_option(option).get("display_name", "")
+                    for option in list(available_types)
+                ]
+                raise ValueError(
+                    "Unknown output routing type '{0}'. Available: {1}".format(
+                        routing_type_name,
+                        ", ".join([name for name in available_names if name])
+                    )
+                )
+
+            track.output_routing_type = routing_type
+
+            if routing_channel_name:
+                available_channels = getattr(track, "available_output_routing_channels", [])
+                routing_channel = self._match_routing_option(available_channels, routing_channel_name)
+                if routing_channel is None:
+                    available_names = [
+                        self._serialize_routing_option(option).get("display_name", "")
+                        for option in list(available_channels)
+                    ]
+                    raise ValueError(
+                        "Unknown output routing channel '{0}'. Available: {1}".format(
+                            routing_channel_name,
+                            ", ".join([name for name in available_names if name])
+                        )
+                    )
+                track.output_routing_channel = routing_channel
+
+            return {
+                "index": track_index,
+                "name": track.name,
+                "routing": self._routing_info_for_track(track)
+            }
+        except Exception as e:
+            self.log_message("Error setting track output routing: " + str(e))
+            raise
+
+    def _set_track_input_routing(self, track_index, routing_type_name, routing_channel_name=None):
+        """Set a track's input routing type and optional channel."""
+        try:
+            resolved = self._resolve_track_reference(track_index, "track")
+            track = resolved["track"]
+
+            available_types = getattr(track, "available_input_routing_types", [])
+            routing_type = self._match_routing_option(available_types, routing_type_name)
+            if routing_type is None:
+                available_names = [
+                    self._serialize_routing_option(option).get("display_name", "")
+                    for option in list(available_types)
+                ]
+                raise ValueError(
+                    "Unknown input routing type '{0}'. Available: {1}".format(
+                        routing_type_name,
+                        ", ".join([name for name in available_names if name])
+                    )
+                )
+
+            track.input_routing_type = routing_type
+
+            if routing_channel_name:
+                available_channels = getattr(track, "available_input_routing_channels", [])
+                routing_channel = self._match_routing_option(available_channels, routing_channel_name)
+                if routing_channel is None:
+                    available_names = [
+                        self._serialize_routing_option(option).get("display_name", "")
+                        for option in list(available_channels)
+                    ]
+                    raise ValueError(
+                        "Unknown input routing channel '{0}'. Available: {1}".format(
+                            routing_channel_name,
+                            ", ".join([name for name in available_names if name])
+                        )
+                    )
+                track.input_routing_channel = routing_channel
+
+            return self._get_track_input_routing(resolved["index"])
+        except Exception as e:
+            self.log_message("Error setting track input routing: " + str(e))
+            raise
+
+    def _get_track_monitor_state(self, track_index):
+        """Get the current monitor state for a regular track."""
+        try:
+            resolved = self._resolve_track_reference(track_index, "track")
+            track = resolved["track"]
+            current_value = self._safe_int(getattr(track, "current_monitoring_state", None))
+            state_map = self._monitoring_state_map(track)
+            return {
+                "track_scope": "track",
+                "index": resolved["index"],
+                "name": track.name,
+                "current_monitoring_state": current_value,
+                "current_monitoring_state_name": self._monitoring_state_name(track, current_value),
+                "available_monitoring_states": [
+                    {"name": name, "value": value}
+                    for name, value in sorted(state_map.items())
+                ],
+            }
+        except Exception as e:
+            self.log_message("Error getting track monitor state: " + str(e))
+            raise
+
+    def _set_track_monitor_state(self, track_index, state_name=None, state_value=None):
+        """Set the current monitor state for a regular track."""
+        try:
+            resolved = self._resolve_track_reference(track_index, "track")
+            track = resolved["track"]
+            wanted = self._coerce_monitoring_state_value(track, state_name, state_value)
+            track.current_monitoring_state = wanted
+            return self._get_track_monitor_state(resolved["index"])
+        except Exception as e:
+            self.log_message("Error setting track monitor state: " + str(e))
+            raise
+
+    def _get_track_meter(self, track_index, track_scope="track"):
+        """Get output meter values for a track, return, or master bus."""
+        try:
+            resolved = self._resolve_track_reference(track_index, track_scope)
+            return self._meter_payload_for_track(
+                resolved["index"],
+                resolved["track"],
+                resolved["track_scope"],
+            )
+        except Exception as e:
+            self.log_message("Error getting track meter: " + str(e))
             raise
     
     def _create_audio_track(self, index):
@@ -612,62 +1483,131 @@ class AbletonMCP(ControlSurface):
             self.log_message("Error setting track panning: " + str(e))
             raise
 
-    def _get_device_parameters(self, track_index, device_index):
+    def _get_device_parameters(self, track_index, device_index, track_scope="track"):
         """Get all parameters of a device on a track"""
         try:
-            if track_index < 0 or track_index >= len(self._song.tracks):
-                raise IndexError("Track index out of range")
-            track = self._song.tracks[track_index]
-            if device_index < 0 or device_index >= len(track.devices):
+            resolved = self._resolve_track_reference(track_index, track_scope)
+            track = resolved["track"]
+            devices = self._track_devices(track)
+            if device_index < 0 or device_index >= len(devices):
                 raise IndexError("Device index out of range")
-            device = track.devices[device_index]
+            device = devices[device_index]
             params = []
             for i, param in enumerate(device.parameters):
                 try:
                     default_val = param.default_value
                 except:
                     default_val = None
-                params.append({
+                param_payload = {
                     "index": i,
                     "name": param.name,
                     "value": param.value,
                     "min": param.min,
                     "max": param.max,
                     "default": default_val,
-                    "is_quantized": param.is_quantized
-                })
+                    "is_quantized": param.is_quantized,
+                    "display_value": self._parameter_display_value(param),
+                }
+                value_items = self._parameter_value_items(param)
+                if value_items is not None:
+                    param_payload["value_items"] = value_items
+                params.append(param_payload)
             return {
+                "track_scope": resolved["track_scope"],
+                "track_index": resolved["index"],
                 "device_name": device.name,
                 "class_name": device.class_name,
+                "device_index": device_index,
                 "parameters": params
             }
         except Exception as e:
             self.log_message("Error getting device parameters: " + str(e))
             raise
 
-    def _set_device_parameter(self, track_index, device_index, parameter_index, value):
+    def _set_device_parameter(self, track_index, device_index, parameter_index, value, track_scope="track"):
         """Set a specific parameter on a device"""
         try:
-            if track_index < 0 or track_index >= len(self._song.tracks):
-                raise IndexError("Track index out of range")
-            track = self._song.tracks[track_index]
-            if device_index < 0 or device_index >= len(track.devices):
+            resolved = self._resolve_track_reference(track_index, track_scope)
+            track = resolved["track"]
+            devices = self._track_devices(track)
+            if device_index < 0 or device_index >= len(devices):
                 raise IndexError("Device index out of range")
-            device = track.devices[device_index]
+            device = devices[device_index]
             if parameter_index < 0 or parameter_index >= len(device.parameters):
                 raise IndexError("Parameter index out of range")
             param = device.parameters[parameter_index]
             value = max(param.min, min(param.max, float(value)))
             param.value = value
             return {
+                "track_scope": resolved["track_scope"],
+                "track_index": resolved["index"],
                 "device": device.name,
+                "device_index": device_index,
                 "parameter": param.name,
+                "parameter_index": parameter_index,
                 "value": param.value,
+                "display_value": self._parameter_display_value(param),
                 "min": param.min,
                 "max": param.max
             }
         except Exception as e:
             self.log_message("Error setting device parameter: " + str(e))
+            raise
+
+    def _find_device_by_name(self, track_index, name, track_scope="track", exact=True):
+        """Find devices on a track-like object by name."""
+        try:
+            resolved = self._resolve_track_reference(track_index, track_scope)
+            track = resolved["track"]
+            wanted = str(name or "").strip().lower()
+            matches = []
+            for device_index, device in enumerate(self._track_devices(track)):
+                device_name = str(getattr(device, "name", "") or "")
+                candidate = device_name.strip().lower()
+                matched = candidate == wanted if exact else wanted in candidate
+                if matched:
+                    matches.append({
+                        "index": device_index,
+                        "name": device_name,
+                        "class_name": getattr(device, "class_name", ""),
+                        "type": self._get_device_type(device),
+                    })
+            return {
+                "track_scope": resolved["track_scope"],
+                "track_index": resolved["index"],
+                "track_name": track.name,
+                "name": name,
+                "exact": bool(exact),
+                "matches": matches,
+            }
+        except Exception as e:
+            self.log_message("Error finding device by name: " + str(e))
+            raise
+
+    def _delete_device(self, track_index, device_index, track_scope="track"):
+        """Delete a device from a track-like object."""
+        try:
+            resolved = self._resolve_track_reference(track_index, track_scope)
+            track = resolved["track"]
+            devices = self._track_devices(track)
+            if device_index < 0 or device_index >= len(devices):
+                raise IndexError("Device index out of range")
+            device_name = devices[device_index].name
+            track.delete_device(device_index)
+            remaining = [
+                getattr(device, "name", "")
+                for device in self._track_devices(track)
+            ]
+            return {
+                "track_scope": resolved["track_scope"],
+                "track_index": resolved["index"],
+                "track_name": track.name,
+                "deleted_device_index": device_index,
+                "deleted_device_name": device_name,
+                "remaining_devices": remaining,
+            }
+        except Exception as e:
+            self.log_message("Error deleting device: " + str(e))
             raise
 
     def _create_clip(self, track_index, clip_index, length):
@@ -854,6 +1794,71 @@ class AbletonMCP(ControlSurface):
         except Exception as e:
             self.log_message("Error stopping playback: " + str(e))
             raise
+
+    def _stop_all_clips(self):
+        """Stop all Session clips without claiming Arrangement has been restored."""
+        try:
+            playing_before = self._collect_playing_clips()
+            method = None
+            if hasattr(self._song, "stop_all_clips"):
+                self._song.stop_all_clips()
+                method = "song.stop_all_clips"
+            else:
+                method = "clip_slot.stop"
+                for track in self._song.tracks:
+                    stop_all = getattr(track, "stop_all_clips", None)
+                    if callable(stop_all):
+                        stop_all()
+                        continue
+                    for clip_slot in track.clip_slots:
+                        try:
+                            clip_slot.stop()
+                        except Exception:
+                            continue
+
+            transport_state = self._get_transport_state()
+            playing_after = transport_state.get("playing_clips", [])
+            return {
+                "method": method,
+                "playing_clip_count_before": len(playing_before),
+                "playing_clip_count_after": len(playing_after),
+                "stopped": len(playing_after) == 0,
+                "transport_state": transport_state,
+            }
+        except Exception as e:
+            self.log_message("Error stopping all clips: " + str(e))
+            raise
+
+    def _back_to_arrangement(self):
+        """Return the set to Arrangement playback and report whether that was verified."""
+        try:
+            playing_before = self._collect_playing_clips()
+            invocation = self._invoke_back_to_arrangement()
+            fallback_used = False
+            if invocation is None:
+                fallback_used = True
+                invocation = self._stop_all_clips()
+                invocation = {
+                    "method": invocation.get("method"),
+                    "action": "fallback_stop_all_clips",
+                }
+
+            transport_state = self._get_transport_state()
+            playing_after = transport_state.get("playing_clips", [])
+            return {
+                "method": invocation.get("method"),
+                "action": invocation.get("action"),
+                "fallback_used": fallback_used,
+                "playing_clips_before": playing_before,
+                "playing_clips_after": playing_after,
+                "arrangement_export_ready": transport_state.get("arrangement_export_ready", False),
+                "transport_state": transport_state,
+                "warning": None if transport_state.get("arrangement_export_ready", False)
+                else "Arrangement state could not be positively verified after this action.",
+            }
+        except Exception as e:
+            self.log_message("Error returning to Arrangement: " + str(e))
+            raise
     
     def _get_browser_item(self, uri, path):
         """Get a browser item by URI or path"""
@@ -941,13 +1946,15 @@ class AbletonMCP(ControlSurface):
     
     
     
-    def _load_browser_item(self, track_index, item_uri):
+    def _load_instrument_or_effect(self, track_index, uri, track_scope="track"):
+        """Load an instrument or effect by URI onto a track-like object."""
+        return self._load_browser_item(track_index, uri, track_scope)
+
+    def _load_browser_item(self, track_index, item_uri, track_scope="track"):
         """Load a browser item onto a track by its URI"""
         try:
-            if track_index < 0 or track_index >= len(self._song.tracks):
-                raise IndexError("Track index out of range")
-            
-            track = self._song.tracks[track_index]
+            resolved = self._resolve_track_reference(track_index, track_scope)
+            track = resolved["track"]
             
             # Access the application's browser instance instead of creating a new one
             app = self.application()
@@ -967,6 +1974,8 @@ class AbletonMCP(ControlSurface):
             result = {
                 "loaded": True,
                 "item_name": item.name,
+                "track_scope": resolved["track_scope"],
+                "track_index": resolved["index"],
                 "track_name": track.name,
                 "uri": item_uri
             }
@@ -974,6 +1983,50 @@ class AbletonMCP(ControlSurface):
         except Exception as e:
             self.log_message("Error loading browser item: {0}".format(str(e)))
             self.log_message(traceback.format_exc())
+            raise
+
+    def _get_arrangement_summary(self, detail_level="basic"):
+        """Get a lightweight summary of arrangement clip extents."""
+        try:
+            normalized_detail_level = str(detail_level or "basic").strip().lower()
+            if normalized_detail_level not in ("basic", "track_extents", "clips"):
+                raise ValueError(
+                    "Unknown arrangement detail level '{0}'".format(detail_level)
+                )
+
+            result = {
+                "detail_level": normalized_detail_level,
+                "song_length": self._safe_float(getattr(self._song, "song_length", None)),
+                "current_song_time": self._safe_float(getattr(self._song, "current_song_time", None)),
+                "is_playing": bool(getattr(self._song, "is_playing", False)),
+                "file_path": getattr(self._song, "file_path", None),
+                "track_count": len(self._song.tracks),
+            }
+            if normalized_detail_level == "basic":
+                return result
+
+            track_summaries = []
+            first_clip_start = None
+            last_clip_end = None
+            include_clips = normalized_detail_level == "clips"
+            for track_index, track in enumerate(self._song.tracks):
+                summary = self._collect_arrangement_clip_summary(track_index, track, include_clips=include_clips)
+                track_summaries.append(summary)
+                if summary["first_clip_start_time"] is not None:
+                    if first_clip_start is None or summary["first_clip_start_time"] < first_clip_start:
+                        first_clip_start = summary["first_clip_start_time"]
+                if summary["last_clip_end_time"] is not None:
+                    if last_clip_end is None or summary["last_clip_end_time"] > last_clip_end:
+                        last_clip_end = summary["last_clip_end_time"]
+
+            result.update({
+                "first_clip_start_time": first_clip_start,
+                "last_clip_end_time": last_clip_end,
+                "tracks": track_summaries,
+            })
+            return result
+        except Exception as e:
+            self.log_message("Error getting arrangement summary: " + str(e))
             raise
     
     def _find_browser_item_by_uri(self, browser_or_item, uri, max_depth=10, current_depth=0):
